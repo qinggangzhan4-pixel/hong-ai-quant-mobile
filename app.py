@@ -18,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.3",
+    page_title="洪老师AI量化 v2.3.1",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -532,8 +532,10 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.3")
+st.title("📈 洪老师 AI 量化 v2.3.1")
 st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
+if st.session_state.get("auto_scan_error"):
+    st.warning(f"自动评分未完成：{st.session_state.auto_scan_error}")
 
 with st.expander("⚙️ 账户参数", expanded=False):
     equity = st.number_input("账户总资产（元）", min_value=10000.0, value=float(cfg["account"]["equity"]), step=1000.0)
@@ -553,6 +555,36 @@ if "live_selected" not in st.session_state:
     st.session_state.live_selected = None
 if "holdings" not in st.session_state:
     st.session_state.holdings = _holdings_from_url()
+if "auto_scan_once_done" not in st.session_state:
+    st.session_state.auto_scan_once_done = False
+
+# ---------------- one-time auto scan ----------------
+# 每个新会话自动跑一次实时评分；失败也不会反复死循环。
+if not st.session_state.auto_scan_once_done and st.session_state.scores is None:
+    st.session_state.auto_scan_once_done = True
+    try:
+        with st.spinner("正在自动运行一次全市场实时评分……"):
+            market, snapshot, selected, meta = fetch_live_a_scan(
+                preselect_n=20,
+                history_calendar_days=150,
+                max_workers=4,
+            )
+            st.session_state.market = market
+            st.session_state.live_snapshot = snapshot
+            st.session_state.live_meta = meta
+            st.session_state.live_selected = selected
+            h = _refresh_holdings_prices(snapshot)
+            scores, _ = score_universe(
+                market,
+                cfg,
+                h,
+                str(MODEL_PATH) if MODEL_PATH.exists() else None,
+            )
+            scores = _apply_live_market_context(scores, meta)
+            st.session_state.scores = scores
+        st.toast(f"自动评分完成：{len(scores)}只深度评分", icon="✅")
+    except Exception as e:
+        st.session_state.auto_scan_error = str(e)
 
 # ---------------- tabs ----------------
 tab1, tab2, tab3, tab4 = st.tabs(["🏆 今日候选", "🔎 查一只", "💼 我的持仓", "📤 数据"])
