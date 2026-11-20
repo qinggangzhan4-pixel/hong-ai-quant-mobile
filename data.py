@@ -218,8 +218,9 @@ def live_market_context(snapshot: pd.DataFrame) -> dict:
 def preselect_live_candidates(snapshot: pd.DataFrame, limit: int = 20) -> pd.DataFrame:
     """全市场实时预筛：先快速缩小到少量股票，再拉历史做深度评分。"""
     x = snapshot.copy()
-    x = x[x["is_mainboard"].fillna(False)]
-    x = x[~x["is_st"].fillna(False)]
+    main_mask = x["is_mainboard"].fillna(False).map(bool).astype(bool)
+    st_mask = x["is_st"].fillna(False).map(bool).astype(bool)
+    x = x.loc[main_mask & st_mask.eq(False)].copy()
     x = x[(x["close"] >= 2.0) & (x["close"] <= 300.0)]
     x = x[pd.to_numeric(x["amount"], errors="coerce").fillna(0) >= 20_000_000]
     if x.empty:
