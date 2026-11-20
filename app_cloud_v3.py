@@ -3,8 +3,23 @@ from pathlib import Path
 import sys
 import types
 import shutil
+import importlib
 
 ROOT = Path(__file__).resolve().parent
+
+# Streamlit 热更新时 Python 进程可能继续缓存旧模块。
+# 每次脚本重跑都清掉业务子模块，确保 GitHub 最新修复真正生效。
+for _mod in [
+    "ai_quant.engine",
+    "ai_quant.features",
+    "ai_quant.scoring",
+    "ai_quant.relay",
+    "ai_quant.risk",
+    "ai_quant.ml_model",
+    "ai_quant.data",
+    "ai_quant.config",
+]:
+    sys.modules.pop(_mod, None)
 
 # 手机上传把 ai_quant/ 目录拍平后，让仓库根目录继续充当 ai_quant 包。
 if "ai_quant" not in sys.modules:
