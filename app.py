@@ -18,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.4.1",
+    page_title="洪老师AI量化 v2.4.2",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -532,9 +532,9 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.4.1")
+st.title("📈 洪老师 AI 量化 v2.4.2")
 st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
-st.caption("Build: 2026-11-20-fix2 ｜ 已修复 pandas 布尔掩码兼容问题")
+st.caption("Build: 2026-11-20-fast-scan ｜ 实时全A改为单请求，已移除阻塞式自动扫描")
 if st.session_state.get("auto_scan_error"):
     st.warning(f"自动评分未完成：{st.session_state.auto_scan_error}")
 
@@ -558,34 +558,6 @@ if "holdings" not in st.session_state:
     st.session_state.holdings = _holdings_from_url()
 if "auto_scan_once_done" not in st.session_state:
     st.session_state.auto_scan_once_done = False
-
-# ---------------- one-time auto scan ----------------
-# 每个新会话自动跑一次实时评分；失败也不会反复死循环。
-if not st.session_state.auto_scan_once_done and st.session_state.scores is None:
-    st.session_state.auto_scan_once_done = True
-    try:
-        with st.spinner("正在自动运行一次全市场实时评分……"):
-            market, snapshot, selected, meta = fetch_live_a_scan(
-                preselect_n=20,
-                history_calendar_days=150,
-                max_workers=4,
-            )
-            st.session_state.market = market
-            st.session_state.live_snapshot = snapshot
-            st.session_state.live_meta = meta
-            st.session_state.live_selected = selected
-            h = _refresh_holdings_prices(snapshot)
-            scores, _ = score_universe(
-                market,
-                cfg,
-                h,
-                str(MODEL_PATH) if MODEL_PATH.exists() else None,
-            )
-            scores = _apply_live_market_context(scores, meta)
-            st.session_state.scores = scores
-        st.toast(f"自动评分完成：{len(scores)}只深度评分", icon="✅")
-    except Exception as e:
-        st.session_state.auto_scan_error = str(e)
 
 def _live_snapshot_table(snapshot, limit=100):
     if snapshot is None or len(snapshot) == 0:
