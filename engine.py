@@ -28,11 +28,11 @@ def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame
     # pandas 2.x / object dtype 下，直接对 object 布尔列使用 ~ 可能得到 -1/-2，
     # 随后被 DataFrame 当成“列名”索引，触发 None of [Index([-1,...])] are in the [columns]。
     excluded_mask = latest["symbol"].astype(str).map(lambda x: bool(_is_excluded(x, config))).fillna(False).astype(bool)
-    latest = latest.loc[~excluded_mask].copy()
+    latest = latest.loc[excluded_mask.eq(False)].copy()
 
     if config["universe"].get("exclude_st", True):
         st_mask = latest["is_st"].fillna(False).map(bool).astype(bool)
-        latest = latest.loc[~st_mask].copy()
+        latest = latest.loc[st_mask.eq(False)].copy()
     price_mask = (
         (pd.to_numeric(latest["close"], errors="coerce") >= config["universe"]["min_price"])
         & (pd.to_numeric(latest["close"], errors="coerce") <= config["universe"]["max_price"])
@@ -51,7 +51,7 @@ def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame
     rw = config["strategy"]["rule_weight"]
     mw = config["strategy"]["model_weight"]
     latest["combined_score"] = latest["rule_score"]
-    use_ml = ~pd.isna(latest["ml_probability"])
+    use_ml = latest["ml_probability"].notna()
     latest.loc[use_ml, "combined_score"] = rw * latest.loc[use_ml, "rule_score"] + mw * (latest.loc[use_ml, "ml_probability"] * 100)
 
     relay_results = latest.apply(lambda r: relay_watch(r, config), axis=1)
