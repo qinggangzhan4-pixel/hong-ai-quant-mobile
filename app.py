@@ -419,6 +419,8 @@ if "live_meta" not in st.session_state:
     st.session_state.live_meta = None
 if "live_snapshot" not in st.session_state:
     st.session_state.live_snapshot = None
+if "live_selected" not in st.session_state:
+    st.session_state.live_selected = None
 if "holdings" not in st.session_state:
     st.session_state.holdings = _holdings_from_url()
 
@@ -546,6 +548,7 @@ with tab1:
                 st.session_state.market = market
                 st.session_state.live_snapshot = snapshot
                 st.session_state.live_meta = meta
+                st.session_state.live_selected = selected
 
                 status.write("④ 更新当前持仓现价")
                 h = _refresh_holdings_prices(snapshot)
@@ -583,7 +586,37 @@ with tab1:
                 f"扫描时间：{meta.get('scan_time','')} ｜ 平均涨跌：{meta.get('avg_pct_change',0):+.2f}% ｜ "
                 f"深度数据成功 {meta.get('deep_loaded',0)} 只 / 失败 {meta.get('failed',0)} 只"
             )
-            st.caption("实时数据来自 AkShare 接入的公开网页行情快照，不是券商逐笔；盘中点击按钮即可重新刷新。")
+
+            snapshot = st.session_state.live_snapshot
+            if snapshot is not None and len(snapshot):
+                st.markdown("#### 🔥 实时涨幅榜 Top 15")
+                movers = snapshot.copy()
+                main_mask = movers["is_mainboard"].fillna(False).map(bool).astype(bool)
+                st_mask = movers["is_st"].fillna(False).map(bool).astype(bool)
+                movers = movers.loc[main_mask & ~st_mask].copy()
+                movers = movers.sort_values("pct_change", ascending=False).head(15)
+                show_cols = [c for c in ["symbol","name","close","pct_change","turnover_rate","live_volume_ratio","amount"] if c in movers.columns]
+                movers_show = movers[show_cols].copy().rename(columns={
+                    "symbol":"代码","name":"名称","close":"现价","pct_change":"涨幅%",
+                    "turnover_rate":"换手%","live_volume_ratio":"量比","amount":"成交额"
+                })
+                if "成交额" in movers_show.columns:
+                    movers_show["成交额"] = pd.to_numeric(movers_show["成交额"], errors="coerce") / 1e8
+                    movers_show = movers_show.rename(columns={"成交额":"成交额(亿)"})
+                st.dataframe(movers_show, use_container_width=True, hide_index=True)
+
+            selected = st.session_state.live_selected
+            if selected is not None and len(selected):
+                st.markdown("#### 🎯 量化预筛 Top 15")
+                cand = selected.head(15).copy()
+                show_cols = [c for c in ["symbol","name","close","pct_change","turnover_rate","live_volume_ratio","live_pre_score"] if c in cand.columns]
+                cand_show = cand[show_cols].copy().rename(columns={
+                    "symbol":"代码","name":"名称","close":"现价","pct_change":"涨幅%",
+                    "turnover_rate":"换手%","live_volume_ratio":"量比","live_pre_score":"预筛分"
+                })
+                st.dataframe(cand_show, use_container_width=True, hide_index=True)
+
+            st.caption("实时数据来自公开网页行情快照，不是券商逐笔；盘中点击按钮即可重新刷新。")
 
     if st.session_state.scores is None:
         st.info("点击上面的“获取实时行情并自动量化”，或者到“数据”页上传CSV/载入演示数据。")
@@ -591,7 +624,7 @@ with tab1:
         scores = st.session_state.scores.copy()
         latest = scores["date"].max() if "date" in scores.columns and len(scores) else ""
         st.caption(f"评分日期：{latest}")
-        filt = st.segmented_control("范围", ["全部", "首仓候选", "观察", "接力候选"], default="首仓候选")
+        filt = st.segmented_control("范围", ["全部", "首仓候选", "观察", "接力候选"], default="全部")
         view = scores
         if filt == "首仓候选":
             view = scores[scores["signal"] == "BUY_CANDIDATE"]
