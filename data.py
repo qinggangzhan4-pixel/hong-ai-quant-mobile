@@ -71,60 +71,49 @@ def _get_json(url: str, params: dict, timeout: float = 12.0) -> dict:
 
 
 def fetch_realtime_a_snapshot() -> pd.DataFrame:
-    """抓取全 A 股公开网页实时快照（东方财富），自动分页拿全市场。
+    """一次请求抓取沪深京 A 股实时快照。
 
-    这不是券商逐笔数据。盘中可刷新；午休/收盘时返回最近快照。
+    使用东方财富与 AkShare 同类参数：np=2 + pz=20000。
+    这样避免旧版“60多页并发分页”把 Streamlit 手机页面卡住。
+    不是券商逐笔；盘中为公开网页实时快照。
     """
     fields = [
         "f12","f14","f2","f3","f4","f5","f6","f7","f15","f16","f17","f18",
         "f10","f8","f9","f23","f20","f21","f22","f11"
     ]
-    base_params = {
-        "pz": 100,
+    params = {
+        "pn": 1,
+        "pz": 20000,
         "po": 1,
-        "np": 1,
+        "np": 2,
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2,
         "invt": 2,
         "fid": "f3",
-        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+        "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
         "fields": ",".join(fields),
     }
 
-    # 第一页先拿总数。东方财富这个接口单页常被限制在约100只，
-    # 所以原先只请求一页会误把“涨幅前100”当成“全市场”。
-    p1 = dict(base_params)
-    p1["pn"] = 1
-    j1 = _get_json("https://push2.eastmoney.com/api/qt/clist/get", p1, timeout=10)
-    data1 = j1.get("data") or {}
-    first = data1.get("diff") or []
-    total = int(data1.get("total") or len(first))
-    if not first:
+    # 82 节点是 AkShare 长期使用的东财行情节点；单请求避免几十页等待。
+    j = _get_json("https://82.push2.eastmoney.com/api/qt/clist/get", params, timeout=12)
+    data = j.get("data") or {}
+    diff = data.get("diff") or []
+
+    # 不同时间东财可能返回 list，也可能返回 {"0": {...}, ...}。
+    if isinstance(diff, dict):
+        records = list(diff.values())
+    elif isinstance(diff, list):
+        records = diff
+    else:
+        records = []
+
+    if not records:
         raise RuntimeError("实时 A 股快照为空，请稍后重试。")
 
-    page_size = max(1, len(first))
-    pages = max(1, int(np.ceil(total / page_size)))
-
-    all_diff = list(first)
-
-    def fetch_page(pn: int):
-        p = dict(base_params)
-        p["pn"] = pn
-        j = _get_json("https://push2.eastmoney.com/api/qt/clist/get", p, timeout=10)
-        return ((j.get("data") or {}).get("diff") or [])
-
-    # 并发补齐后续页面，避免手机端一页页等。
-    if pages > 1:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futs = {pool.submit(fetch_page, pn): pn for pn in range(2, pages + 1)}
-            for f in as_completed(futs):
-                try:
-                    all_diff.extend(f.result())
-                except Exception:
-                    # 少量页面失败时保留已拿到的数据；最终会在 meta 里显示实际数量。
-                    pass
-
     rows = []
-    for d in all_diff:
+    for d in records:
+        if not isinstance(d, dict):
+            continue
         rows.append({
             "symbol": d.get("f12"),
             "name": d.get("f14"),
@@ -147,6 +136,7 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
             "speed": d.get("f22"),
             "change_5m": d.get("f11"),
         })
+
     out = pd.DataFrame(rows)
     if out.empty:
         raise RuntimeError("实时 A 股快照解析为空，请稍后重试。")
@@ -154,18 +144,24 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
     out["symbol"] = out["symbol"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
     out = out.drop_duplicates(subset=["symbol"], keep="first").reset_index(drop=True)
     out["name"] = out["name"].fillna("").astype(str)
+
     numeric = [
         "close","pct_change","price_change","volume","amount","amplitude","high","low","open",
         "prev_close","live_volume_ratio","turnover_rate","pe_ttm","pb","market_cap",
         "float_market_cap","speed","change_5m",
     ]
     out = _to_num(out, numeric)
+
     now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
     out["date"] = pd.Timestamp(now_cn.date())
     out["is_st"] = out["name"].str.upper().str.contains(r"ST|退", regex=True)
     out["is_mainboard"] = out["symbol"].map(_is_mainboard_symbol)
     out["is_limit_up"] = out["pct_change"].fillna(-999) >= 9.5
     out = out[out["close"].fillna(0) > 0].reset_index(drop=True)
+
+    # 正常沪深京A股应该是数千只；若只拿到100/200只，明确报错，不再假装是“全市场”。
+    if len(out) < 1000:
+        raise RuntimeError(f"实时接口只返回 {len(out)} 只，未拿到完整市场，请稍后重试。")
     return out
 
 def fetch_realtime_etf_snapshot() -> pd.DataFrame:
