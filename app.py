@@ -9,6 +9,7 @@ import streamlit as st
 from ai_quant.config import load_config
 from ai_quant.engine import score_universe
 from ai_quant.risk import portfolio_risk
+from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot
 
 ROOT = Path(__file__).resolve().parent
 CFG_PATH = ROOT / "config.yaml"
@@ -17,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.1",
+    page_title="洪老师AI量化 v2.2",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -266,6 +267,96 @@ def holding_action_table(holdings):
     return pd.DataFrame(rows)
 
 
+
+def _live_market_score(meta):
+    if not meta:
+        return 10.0
+    b = float(meta.get("up_ratio", 0.5))
+    if b >= 0.65:
+        score = 12
+    elif b >= 0.55:
+        score = 10
+    elif b >= 0.45:
+        score = 8
+    elif b >= 0.35:
+        score = 5
+    else:
+        score = 2
+    score += 4 if float(meta.get("avg_pct_change", 0)) > 0 else 1
+    lu = int(meta.get("limit_up", 0))
+    ld = int(meta.get("limit_down", 0))
+    if lu > ld * 1.2:
+        score += 4
+    elif ld > lu * 1.5:
+        score += 1
+    else:
+        score += 2
+    return float(min(score, 20))
+
+
+def _apply_live_market_context(scores, meta):
+    if scores is None or len(scores) == 0:
+        return scores
+    x = scores.copy()
+    live_score = _live_market_score(meta)
+    old_market = pd.to_numeric(x["market_score"], errors="coerce").fillna(0)
+    x["market_score"] = live_score
+    x["rule_score"] = pd.to_numeric(x["rule_score"], errors="coerce").fillna(0) - old_market + live_score
+
+    ml = pd.to_numeric(x.get("ml_probability", np.nan), errors="coerce")
+    rw = float(cfg["strategy"]["rule_weight"])
+    mw = float(cfg["strategy"]["model_weight"])
+    x["combined_score"] = x["rule_score"]
+    if isinstance(ml, pd.Series):
+        use_ml = ml.notna()
+        x.loc[use_ml, "combined_score"] = rw * x.loc[use_ml, "rule_score"] + mw * (ml[use_ml] * 100)
+
+    buy_th = float(cfg["strategy"]["score_buy_threshold"])
+    watch_th = float(cfg["strategy"]["score_watch_threshold"])
+    x["signal"] = np.where(
+        x["combined_score"] >= buy_th,
+        "BUY_CANDIDATE",
+        np.where(x["combined_score"] >= watch_th, "WATCH", "AVOID"),
+    )
+    if "relay_status" in x.columns and "relay_score" in x.columns:
+        applicable = x["relay_status"].astype(str) != "not_applicable"
+        x.loc[applicable & (x["relay_score"] < 50), "signal"] = "AVOID_RELAY"
+        x.loc[applicable & (x["relay_score"] >= 70), "signal"] = "RELAY_CANDIDATE"
+    return x.sort_values(["combined_score", "relay_score"], ascending=False).reset_index(drop=True)
+
+
+def _refresh_holdings_prices(snapshot):
+    h = clean_holdings(st.session_state.holdings)
+    if h.empty or snapshot is None or len(snapshot) == 0:
+        return h
+    live = snapshot[["symbol", "close"]].copy()
+    live["symbol"] = live["symbol"].astype(str).str.zfill(6)
+    price_map = dict(zip(live["symbol"], pd.to_numeric(live["close"], errors="coerce")))
+
+    # ETF 单独抓取；失败时不影响股票扫描。
+    try:
+        etf = fetch_realtime_etf_snapshot()
+        if etf is not None and len(etf):
+            etf["symbol"] = etf["symbol"].astype(str).str.zfill(6)
+            for _, r in etf.iterrows():
+                try:
+                    if pd.notna(r["close"]):
+                        price_map[str(r["symbol"])] = float(r["close"])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    for i, r in h.iterrows():
+        symbol = str(r["symbol"]).zfill(6)
+        if symbol in price_map and pd.notna(price_map[symbol]):
+            h.at[i, "current_price"] = float(price_map[symbol])
+    h = clean_holdings(h)
+    st.session_state.holdings = h
+    _holdings_to_url(h)
+    return h
+
+
 def risk_panel(holdings):
     if holdings is None or holdings.empty:
         st.info("还没有录入持仓。录入后会检查总仓、单票和单行业集中度。")
@@ -311,8 +402,8 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.1")
-st.caption("手机网页版 · 市场→行业→个股→买点→仓位→止损→持仓操作。AI不达标自动关闭。")
+st.title("📈 洪老师 AI 量化 v2.2")
+st.caption("手机网页版 · 实时A股→市场→个股→买点→仓位→止损→持仓操作。AI不达标自动关闭。")
 
 with st.expander("⚙️ 账户参数", expanded=False):
     equity = st.number_input("账户总资产（元）", min_value=10000.0, value=float(cfg["account"]["equity"]), step=1000.0)
@@ -324,6 +415,10 @@ if "market" not in st.session_state:
     st.session_state.market = None
 if "scores" not in st.session_state:
     st.session_state.scores = None
+if "live_meta" not in st.session_state:
+    st.session_state.live_meta = None
+if "live_snapshot" not in st.session_state:
+    st.session_state.live_snapshot = None
 if "holdings" not in st.session_state:
     st.session_state.holdings = _holdings_from_url()
 
@@ -433,8 +528,50 @@ with tab3:
 
 with tab1:
     st.subheader("今日候选")
+
+    with st.expander("⚡ 实时 A 股扫描", expanded=True):
+        st.caption("一键抓取全A实时快照 → 主板预筛 → 拉取近期历史 → 自动评分。科创板/创业板/北交所按当前配置排除。")
+        scan_n = st.selectbox("深度评分股票数", [20, 30, 40, 50], index=1)
+        if st.button("⚡ 获取实时行情并自动量化", type="primary", use_container_width=True):
+            try:
+                with st.spinner("正在抓取全A行情并进行两阶段量化，通常需要几十秒……"):
+                    market, snapshot, selected, meta = fetch_live_a_scan(
+                        preselect_n=int(scan_n),
+                        history_calendar_days=150,
+                        max_workers=4,
+                    )
+                    st.session_state.market = market
+                    st.session_state.live_snapshot = snapshot
+                    st.session_state.live_meta = meta
+                    h = _refresh_holdings_prices(snapshot)
+
+                    scores, _ = score_universe(
+                        market,
+                        cfg,
+                        h,
+                        str(MODEL_PATH) if MODEL_PATH.exists() else None,
+                    )
+                    scores = _apply_live_market_context(scores, meta)
+                    st.session_state.scores = scores
+                st.success(f"实时扫描完成：全市场 {meta.get('count', 0)} 只，预筛 {meta.get('preselected', 0)} 只，深度评分 {len(scores)} 只。")
+            except Exception as e:
+                st.error(f"实时扫描失败：{e}")
+                st.caption("行情接口偶尔会限流，过几十秒重试即可；不会影响你已保存的持仓。")
+
+        meta = st.session_state.live_meta
+        if meta:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("上涨/下跌", f"{meta.get('up',0)}/{meta.get('down',0)}")
+            c2.metric("涨停/跌停", f"{meta.get('limit_up',0)}/{meta.get('limit_down',0)}")
+            c3.metric("上涨占比", f"{meta.get('up_ratio',0)*100:.1f}%")
+            st.caption(
+                f"扫描时间：{meta.get('scan_time','')} ｜ 平均涨跌：{meta.get('avg_pct_change',0):+.2f}% ｜ "
+                f"深度数据成功 {meta.get('deep_loaded',0)} 只 / 失败 {meta.get('failed',0)} 只"
+            )
+            st.caption("实时数据来自 AkShare 接入的公开网页行情快照，不是券商逐笔；盘中点击按钮即可重新刷新。")
+
     if st.session_state.scores is None:
-        st.info("先到“数据”页上传行情并运行评分；也可以载入演示数据。")
+        st.info("点击上面的“获取实时行情并自动量化”，或者到“数据”页上传CSV/载入演示数据。")
     else:
         scores = st.session_state.scores.copy()
         latest = scores["date"].max() if "date" in scores.columns and len(scores) else ""
