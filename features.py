@@ -51,6 +51,10 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         g["ma10_slope3"] = g["ma10"] / g["ma10"].shift(3) - 1
         g["vol_ma5"] = g["volume"].rolling(5).mean()
         g["vol_ratio5"] = g["volume"] / g["vol_ma5"].replace(0, np.nan)
+        # 盘中实时扫描时，用东方财富快照提供的量比覆盖“当日部分成交量/5日完整日均量”的失真值。
+        if "live_volume_ratio" in g.columns:
+            live_vr = pd.to_numeric(g["live_volume_ratio"], errors="coerce")
+            g.loc[live_vr.notna(), "vol_ratio5"] = live_vr[live_vr.notna()]
         g["volatility10"] = g["close"].pct_change().rolling(10).std()
         g["atr14"] = _atr(g, 14)
         g["atr14_pct"] = g["atr14"] / g["close"]
