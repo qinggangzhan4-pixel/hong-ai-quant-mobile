@@ -75,6 +75,50 @@ source = source.replace(
 marker = "# ---------------- header ----------------\n"
 persist_helpers = r"""
 # ---------------- browser persistence ----------------
+DEFAULT_HOLDINGS = [
+    {"symbol":"600584","name":"长电科技","industry":"半导体","market_value":5191.00},
+    {"symbol":"002945","name":"华林证券","industry":"金融","market_value":2890.00},
+    {"symbol":"600901","name":"江苏金租","industry":"金融","market_value":28564.00},
+    {"symbol":"516310","name":"银行ETF易方达","industry":"金融","market_value":3166.80},
+]
+
+def _encode_holdings_rows(rows):
+    payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _holdings_from_url():
+    try:
+        token = st.query_params.get("holdings", "")
+        if not token:
+            # 第一次打开时自动带入 2026-11-20 12:30 的实际持仓
+            return clean_holdings(pd.DataFrame(DEFAULT_HOLDINGS))
+        pad = "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8")
+        rows = json.loads(raw)
+        if not rows:
+            return pd.DataFrame(columns=["symbol","name","industry","market_value"])
+        return clean_holdings(pd.DataFrame(rows))
+    except Exception:
+        return clean_holdings(pd.DataFrame(DEFAULT_HOLDINGS))
+
+
+def _holdings_to_url(df):
+    try:
+        h = clean_holdings(df)
+        if h is None or h.empty:
+            token = _encode_holdings_rows([])
+        else:
+            cols = [x for x in ["symbol","name","industry","market_value"] if x in h.columns]
+            token = _encode_holdings_rows(h[cols].to_dict("records"))
+        if st.query_params.get("holdings", "") != token:
+            st.query_params["holdings"] = token
+    except Exception:
+        pass
+
+# ---------------- header ----------------\n"
+persist_helpers = r"""
+# ---------------- browser persistence ----------------
 def _holdings_from_url():
     try:
         token = st.query_params.get("holdings", "")
