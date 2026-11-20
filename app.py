@@ -18,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.2",
+    page_title="洪老师AI量化 v2.3",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -373,6 +373,114 @@ def risk_panel(holdings):
         st.success("组合集中度暂未触发红线。")
 
 
+def _float_or_nan(v):
+    try:
+        if pd.isna(v):
+            return np.nan
+        return float(v)
+    except Exception:
+        return np.nan
+
+
+def trade_levels(row):
+    """把量化评分翻译成可执行的买点/卖点。
+
+    评分决定“有没有资格买”；价格触发决定“什么时候买”。
+    """
+    close = _float_or_nan(row.get("close"))
+    score = _float_or_nan(row.get("combined_score", row.get("rule_score")))
+    ma5 = _float_or_nan(row.get("ma5"))
+    ma10 = _float_or_nan(row.get("ma10"))
+    prior_high20 = _float_or_nan(row.get("prior_high20"))
+    stop = _float_or_nan(row.get("stop_price"))
+    vr = _float_or_nan(row.get("vol_ratio5"))
+    rsi = _float_or_nan(row.get("rsi14"))
+    turnover = _float_or_nan(row.get("turnover_rate"))
+    gap = _float_or_nan(row.get("gap"))
+    ret1 = _float_or_nan(row.get("ret_1"))
+
+    # 回踩区：优先围绕 MA5；若 MA5 暂不可用则退回 MA10，再退回当前价附近。
+    support = ma5
+    if pd.isna(support) or support <= 0:
+        support = ma10
+    if pd.isna(support) or support <= 0:
+        support = close * 0.99 if not pd.isna(close) else np.nan
+
+    buy_low = support * 0.992 if not pd.isna(support) else np.nan
+    buy_high = support * 1.008 if not pd.isna(support) else np.nan
+
+    # 突破价：站上此前20日高点约0.2%，并要求量比>=1.2。
+    breakout = prior_high20 * 1.002 if not pd.isna(prior_high20) and prior_high20 > 0 else np.nan
+
+    # 当前还没触发时，用回踩区上沿作为计划入场参考；已触发则用现价。
+    in_pullback = (
+        not pd.isna(close) and not pd.isna(buy_low) and not pd.isna(buy_high)
+        and buy_low <= close <= buy_high
+    )
+    breakout_ok = (
+        not pd.isna(close) and not pd.isna(breakout)
+        and close >= breakout and (pd.isna(vr) or vr >= 1.2)
+    )
+    entry_ref = close if (in_pullback or breakout_ok) else buy_high
+    if pd.isna(entry_ref) or entry_ref <= 0:
+        entry_ref = close
+
+    tp1 = entry_ref * (1 + float(cfg["strategy"]["first_take_profit_pct"])) if not pd.isna(entry_ref) else np.nan
+    tp2 = entry_ref * (1 + float(cfg["strategy"]["second_take_profit_pct"])) if not pd.isna(entry_ref) else np.nan
+
+    # 统一换手率到百分数口径用于判断。
+    turnover_pct = turnover
+    if not pd.isna(turnover_pct) and turnover_pct <= 1:
+        turnover_pct *= 100
+
+    overheat = (
+        (not pd.isna(rsi) and rsi >= 82)
+        or (not pd.isna(turnover_pct) and turnover_pct >= 20)
+        or (not pd.isna(gap) and gap >= 0.06)
+        or (not pd.isna(ret1) and ret1 >= 0.085)
+    )
+
+    if pd.isna(score):
+        status = "⚪ 数据不足"
+        reason = "先补全评分数据"
+    elif score < float(cfg["strategy"]["score_watch_threshold"]):
+        status = "❌ 不买"
+        reason = "综合分低于观察线"
+    elif score < float(cfg["strategy"]["score_buy_threshold"]):
+        status = "👀 观察"
+        reason = "分数未到75，等评分和价格同时转强"
+    elif not pd.isna(stop) and not pd.isna(close) and close <= stop:
+        status = "🛑 破位"
+        reason = "已到系统止损附近，禁止新开仓"
+    elif overheat:
+        status = "🔥 过热勿追"
+        reason = "RSI/换手/高开/单日涨幅至少一项过热"
+    elif in_pullback:
+        status = "✅ 回踩买点"
+        reason = "进入MA5附近回踩区，可按首仓股数试仓"
+    elif breakout_ok:
+        status = "✅ 突破买点"
+        reason = "突破20日高点且量能满足确认条件"
+    elif not pd.isna(close) and not pd.isna(buy_low) and close < buy_low:
+        status = "⏳ 等重新站回"
+        reason = "回踩偏深，先等重新站回买点区"
+    else:
+        status = "⏳ 等待触发"
+        reason = "不追价，等回踩区或放量突破"
+
+    return {
+        "buy_low": buy_low,
+        "buy_high": buy_high,
+        "breakout": breakout,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "trend_guard": ma5,
+        "status": status,
+        "reason": reason,
+    }
+
+
 def candidate_card(row):
     sig = signal_cn(row.get("signal", ""))
     name = row.get("name", "") if not pd.isna(row.get("name", np.nan)) else ""
@@ -381,6 +489,8 @@ def candidate_card(row):
     score = row.get("combined_score", row.get("rule_score", np.nan))
     ml = row.get("ml_probability", np.nan)
     action = row.get("action", "")
+    levels = trade_levels(row)
+
     html = f"""
 <div class='card'>
   <h3>{name} <span class='muted'>{symbol}</span></h3>
@@ -389,21 +499,41 @@ def candidate_card(row):
     <div><div class='muted'>综合评分</div><div class='bigscore'>{num(score,1)}</div></div>
     <div style='text-align:right'><div class='muted'>现价</div><b>{num(row.get('close'))}</b></div>
   </div>
-  <div class='muted' style='margin-top:10px'>
-    市场 {num(row.get('market_score'),0)}/20 · 行业 {num(row.get('industry_score'),0)}/20 · 质量 {num(row.get('quality_score'),0)}/20 · 趋势 {num(row.get('trend_score'),0)}/25 · 执行 {num(row.get('execution_score'),0)}/15
+
+  <div style='margin-top:12px;padding:10px;border-radius:12px;background:#202630;'>
+    <div style='font-size:1.02rem;font-weight:700'>{levels['status']}</div>
+    <div class='muted' style='margin-top:3px'>{levels['reason']}</div>
   </div>
-  <div style='margin-top:9px'>
-    建议：<b>{action}</b> ｜ 首仓 <b>{int(row.get('suggested_shares',0) or 0)}股</b> ｜ 止损 <b>{num(row.get('stop_price'))}</b>
+
+  <div style='margin-top:12px;line-height:1.8'>
+    <b>回踩买点：</b>{num(levels['buy_low'])} ～ {num(levels['buy_high'])}<br>
+    <b>突破确认：</b>{num(levels['breakout'])} <span class='muted'>（量比≥1.2）</span><br>
+    <b>系统止损：</b>{num(levels['stop'])} ｜ <b>MA5警戒：</b>{num(levels['trend_guard'])}<br>
+    <b>第一止盈：</b>{num(levels['tp1'])} <span class='muted'>（约+8%，可锁1/3）</span><br>
+    <b>第二止盈：</b>{num(levels['tp2'])} <span class='muted'>（约+15%，再锁1/3）</span>
   </div>
-  <div class='muted' style='margin-top:5px'>AI概率：{('未启用' if pd.isna(ml) else f'{float(ml)*100:.1f}%')} · 量比 {num(row.get('vol_ratio5'))} · RSI {num(row.get('rsi14'),0)}</div>
+
+  <div style='margin-top:10px'>
+    建议：<b>{action}</b> ｜ 首仓 <b>{int(row.get('suggested_shares',0) or 0)}股</b>
+  </div>
+
+  <div class='muted' style='margin-top:8px'>
+    市场 {num(row.get('market_score'),0)}/20 · 行业 {num(row.get('industry_score'),0)}/20 ·
+    质量 {num(row.get('quality_score'),0)}/20 · 趋势 {num(row.get('trend_score'),0)}/25 ·
+    执行 {num(row.get('execution_score'),0)}/15
+  </div>
+  <div class='muted' style='margin-top:5px'>
+    AI概率：{('未启用' if pd.isna(ml) else f'{float(ml)*100:.1f}%')} ·
+    量比 {num(row.get('vol_ratio5'))} · RSI {num(row.get('rsi14'),0)}
+  </div>
 </div>
 """
     st.markdown(html, unsafe_allow_html=True)
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.2")
-st.caption("手机网页版 · 实时A股→市场→个股→买点→仓位→止损→持仓操作。AI不达标自动关闭。")
+st.title("📈 洪老师 AI 量化 v2.3")
+st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
 
 with st.expander("⚙️ 账户参数", expanded=False):
     equity = st.number_input("账户总资产（元）", min_value=10000.0, value=float(cfg["account"]["equity"]), step=1000.0)
@@ -661,7 +791,7 @@ with tab2:
                 st.markdown("**执行提示**")
                 score = float(r.get("combined_score", 0))
                 if score >= cfg["strategy"]["score_buy_threshold"]:
-                    st.success("评分允许进入候选，但仍需等回踩确认或放量突破，不等于无条件追价。")
+                    st.success("评分已取得买入资格；按卡片里的“回踩买点”或“突破确认”触发，未触发就不追。")
                 elif score >= cfg["strategy"]["score_watch_threshold"]:
                     st.warning("观察区：不抢，等待价格和量能触发。")
                 else:
