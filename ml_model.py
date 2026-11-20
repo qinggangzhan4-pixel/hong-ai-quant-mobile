@@ -30,7 +30,7 @@ def add_target(df: pd.DataFrame, horizon: int = 3, threshold: float = 0.03) -> p
         full_horizon = shifted.notna().all(axis=1)
         g["future_max_return"] = future_highs / g["close"] - 1
         g["target"] = (g["future_max_return"] >= threshold).astype(float)
-        g.loc[~full_horizon, "target"] = np.nan
+        g.loc[full_horizon.eq(False), "target"] = np.nan
         targets.append(g)
     return pd.concat(targets, ignore_index=True)
 
