@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import base64
+import math
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -15,7 +17,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.0",
+    page_title="洪老师AI量化 v2.1",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -79,15 +81,189 @@ def load_demo():
     return pd.read_csv(DEMO_PATH, dtype={"symbol": str})
 
 
+HOLDING_INPUT_COLUMNS = ["symbol","name","industry","shares","available_shares","cost_price","current_price"]
+HOLDING_COLUMNS = HOLDING_INPUT_COLUMNS + ["market_value","pnl","pnl_pct"]
+
+DEFAULT_HOLDINGS = [
+    {"symbol":"600584","name":"长电科技","industry":"半导体","shares":100,"available_shares":100,"cost_price":54.811,"current_price":51.910},
+    {"symbol":"002945","name":"华林证券","industry":"金融","shares":200,"available_shares":0,"cost_price":14.435,"current_price":14.450},
+    {"symbol":"600901","name":"江苏金租","industry":"金融","shares":3700,"available_shares":2900,"cost_price":7.768,"current_price":7.720},
+    {"symbol":"516310","name":"银行ETF易方达","industry":"金融","shares":2100,"available_shares":1900,"cost_price":1.287,"current_price":1.508},
+]
+
+
 def clean_holdings(df):
     if df is None or len(df) == 0:
-        return None
+        return pd.DataFrame(columns=HOLDING_COLUMNS)
     h = df.copy()
-    if "symbol" in h.columns:
-        h["symbol"] = h["symbol"].astype(str).str.zfill(6)
-    if "market_value" in h.columns:
-        h["market_value"] = pd.to_numeric(h["market_value"], errors="coerce").fillna(0)
-    return h
+    for c in HOLDING_INPUT_COLUMNS:
+        if c not in h.columns:
+            h[c] = "" if c in ["symbol","name","industry"] else 0
+    h["symbol"] = h["symbol"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+    for c in ["shares","available_shares","cost_price","current_price"]:
+        h[c] = pd.to_numeric(h[c], errors="coerce").fillna(0)
+    h["shares"] = h["shares"].clip(lower=0).astype(int)
+    h["available_shares"] = h["available_shares"].clip(lower=0).astype(int)
+    h["available_shares"] = h[["available_shares","shares"]].min(axis=1).astype(int)
+    h["market_value"] = h["shares"] * h["current_price"]
+    h["pnl"] = (h["current_price"] - h["cost_price"]) * h["shares"]
+    h["pnl_pct"] = np.where(h["cost_price"] > 0, h["current_price"] / h["cost_price"] - 1, np.nan)
+    return h[HOLDING_COLUMNS]
+
+
+def _encode_holdings_rows(rows):
+    payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _holdings_from_url():
+    try:
+        token = st.query_params.get("holdings", "")
+        if not token:
+            return clean_holdings(pd.DataFrame(DEFAULT_HOLDINGS))
+        pad = "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8")
+        rows = json.loads(raw)
+        if not rows:
+            return pd.DataFrame(columns=HOLDING_COLUMNS)
+        return clean_holdings(pd.DataFrame(rows))
+    except Exception:
+        return clean_holdings(pd.DataFrame(DEFAULT_HOLDINGS))
+
+
+def _holdings_to_url(df):
+    try:
+        h = clean_holdings(df)
+        rows = [] if h.empty else h[HOLDING_INPUT_COLUMNS].to_dict("records")
+        token = _encode_holdings_rows(rows)
+        if st.query_params.get("holdings", "") != token:
+            st.query_params["holdings"] = token
+    except Exception:
+        pass
+
+
+def _ceil_lot(shares):
+    if shares <= 0:
+        return 0
+    return int(math.ceil(float(shares) / 100.0) * 100)
+
+
+def _floor_lot(shares):
+    if shares <= 0:
+        return 0
+    return int(float(shares) // 100 * 100)
+
+
+def holding_action_table(holdings):
+    h = clean_holdings(holdings)
+    if h.empty:
+        return pd.DataFrame()
+    equity = float(cfg["account"]["equity"])
+    max_single = float(cfg["account"]["max_single_stock"])
+    max_ind = float(cfg["account"]["max_industry_exposure"])
+    max_stop = float(cfg["strategy"]["max_stop_pct"])
+    tp1 = float(cfg["strategy"]["first_take_profit_pct"])
+    tp2 = float(cfg["strategy"]["second_take_profit_pct"])
+    ind_values = h.groupby("industry", dropna=False)["market_value"].sum().to_dict()
+
+    score_lookup = {}
+    if st.session_state.get("scores") is not None and len(st.session_state.scores):
+        tmp = st.session_state.scores.copy()
+        tmp["symbol"] = tmp["symbol"].astype(str).str.zfill(6)
+        score_lookup = {str(r["symbol"]): r for _, r in tmp.iterrows()}
+
+    rows = []
+    for _, r in h.iterrows():
+        symbol = str(r["symbol"]).zfill(6)
+        mv = float(r["market_value"])
+        price = float(r["current_price"])
+        shares = int(r["shares"])
+        available = int(r["available_shares"])
+        weight = mv / equity if equity else 0
+        ind_value = float(ind_values.get(r["industry"], 0))
+        ind_weight = ind_value / equity if equity else 0
+        pnl_pct = float(r["pnl_pct"]) if not pd.isna(r["pnl_pct"]) else np.nan
+
+        single_excess = max(0.0, mv - equity * max_single)
+        reduce_for_single = _ceil_lot(single_excess / price) if price > 0 else 0
+        reduce_now = min(reduce_for_single, _floor_lot(available))
+        industry_excess = max(0.0, ind_value - equity * max_ind)
+
+        risk_line = float(r["cost_price"]) * (1 - max_stop) if float(r["cost_price"]) > 0 else np.nan
+        take_shares = 0
+        if not pd.isna(pnl_pct) and pnl_pct >= tp2:
+            take_shares = min(_floor_lot(shares / 3), _floor_lot(available))
+        elif not pd.isna(pnl_pct) and pnl_pct >= tp1:
+            take_shares = min(_floor_lot(shares / 3), _floor_lot(available))
+
+        reasons = []
+        priority = "持有观察"
+        if weight > max_single:
+            priority = "减仓"
+            if reduce_for_single > 0:
+                if reduce_now >= reduce_for_single:
+                    reasons.append(f"单票{weight*100:.1f}%>15%，按上限至少减{reduce_for_single}股")
+                elif available > 0:
+                    reasons.append(f"单票{weight*100:.1f}%>15%，理论需减{reduce_for_single}股；今日可卖{_floor_lot(available)}股")
+                else:
+                    reasons.append(f"单票{weight*100:.1f}%>15%，但今日可卖0股（T+1）")
+        if ind_weight > max_ind:
+            if priority == "持有观察":
+                priority = "优先降行业仓"
+            reasons.append(f"{r['industry']}仓位{ind_weight*100:.1f}%>30%，行业合计需降约{industry_excess:.0f}元")
+        if not pd.isna(pnl_pct):
+            if pnl_pct <= -max_stop:
+                priority = "止损/减风险"
+                reasons.append(f"回撤{pnl_pct*100:.1f}%已触及{max_stop*100:.0f}%成本风险线")
+            elif pnl_pct <= -0.05:
+                reasons.append(f"回撤{pnl_pct*100:.1f}%接近风险线，禁止补仓")
+            elif pnl_pct >= tp2:
+                reasons.append(f"浮盈{pnl_pct*100:.1f}%进入第二止盈区，可考虑锁利约{take_shares}股")
+            elif pnl_pct >= tp1:
+                reasons.append(f"浮盈{pnl_pct*100:.1f}%进入第一止盈区，可考虑锁利约{take_shares}股")
+
+        score = score_lookup.get(symbol)
+        combined = np.nan
+        signal = ""
+        score_stop = np.nan
+        if score is not None:
+            try:
+                combined = float(score.get("combined_score", np.nan))
+            except Exception:
+                pass
+            signal = signal_cn(score.get("signal", ""))
+            try:
+                score_stop = float(score.get("stop_price", np.nan))
+            except Exception:
+                pass
+            raw_signal = str(score.get("signal", ""))
+            if raw_signal in ["AVOID","AVOID_RELAY"] and weight > 0:
+                priority = "优先减仓"
+                reasons.append("量化评分当前偏弱")
+            elif raw_signal in ["BUY_CANDIDATE","RELAY_CANDIDATE"] and priority == "持有观察":
+                priority = "持有/等触发"
+                reasons.append("量化评分允许进入候选")
+
+        rows.append({
+            "代码": symbol,
+            "名称": r["name"],
+            "持股": shares,
+            "可卖": available,
+            "成本": round(float(r["cost_price"]), 3),
+            "现价": round(price, 3),
+            "市值": round(mv, 2),
+            "盈亏": round(float(r["pnl"]), 2),
+            "盈亏%": None if pd.isna(pnl_pct) else round(pnl_pct * 100, 2),
+            "仓位%": round(weight * 100, 1),
+            "行业仓位%": round(ind_weight * 100, 1),
+            "成本风险线": None if pd.isna(risk_line) else round(risk_line, 3),
+            "量化分": None if pd.isna(combined) else round(combined, 1),
+            "信号": signal,
+            "评分止损": None if pd.isna(score_stop) else round(score_stop, 3),
+            "建议": priority,
+            "说明": "；".join(reasons) if reasons else "暂无强制动作，继续观察",
+        })
+    return pd.DataFrame(rows)
 
 
 def risk_panel(holdings):
@@ -135,8 +311,8 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.0")
-st.caption("手机网页版 · 市场→行业→个股→买点→仓位→止损。AI不达标自动关闭。")
+st.title("📈 洪老师 AI 量化 v2.1")
+st.caption("手机网页版 · 市场→行业→个股→买点→仓位→止损→持仓操作。AI不达标自动关闭。")
 
 with st.expander("⚙️ 账户参数", expanded=False):
     equity = st.number_input("账户总资产（元）", min_value=10000.0, value=float(cfg["account"]["equity"]), step=1000.0)
@@ -149,7 +325,7 @@ if "market" not in st.session_state:
 if "scores" not in st.session_state:
     st.session_state.scores = None
 if "holdings" not in st.session_state:
-    st.session_state.holdings = pd.DataFrame(columns=["symbol","name","industry","market_value"])
+    st.session_state.holdings = _holdings_from_url()
 
 # ---------------- tabs ----------------
 tab1, tab2, tab3, tab4 = st.tabs(["🏆 今日候选", "🔎 查一只", "💼 我的持仓", "📤 数据"])
@@ -197,9 +373,20 @@ with tab4:
 
 with tab3:
     st.subheader("我的持仓")
-    st.caption("直接在手机上改。market_value 填当前市值，不是成本。")
+    st.caption("录入股数、可卖股数、成本价和现价；市值、盈亏和收益率自动计算。")
+
+    c1, c2 = st.columns(2)
+    if c1.button("恢复当前截图持仓"):
+        st.session_state.holdings = clean_holdings(pd.DataFrame(DEFAULT_HOLDINGS))
+        _holdings_to_url(st.session_state.holdings)
+        st.rerun()
+    if c2.button("清空持仓"):
+        st.session_state.holdings = pd.DataFrame(columns=HOLDING_COLUMNS)
+        _holdings_to_url(st.session_state.holdings)
+        st.rerun()
+
     edited = st.data_editor(
-        st.session_state.holdings,
+        st.session_state.holdings[HOLDING_INPUT_COLUMNS],
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -207,15 +394,42 @@ with tab3:
             "symbol": st.column_config.TextColumn("代码"),
             "name": st.column_config.TextColumn("名称"),
             "industry": st.column_config.TextColumn("行业"),
-            "market_value": st.column_config.NumberColumn("市值", min_value=0.0, step=100.0, format="%.0f"),
+            "shares": st.column_config.NumberColumn("持股", min_value=0, step=100, format="%d"),
+            "available_shares": st.column_config.NumberColumn("可卖", min_value=0, step=100, format="%d"),
+            "cost_price": st.column_config.NumberColumn("成本", min_value=0.0, step=0.01, format="%.3f"),
+            "current_price": st.column_config.NumberColumn("现价", min_value=0.0, step=0.01, format="%.3f"),
         },
-        key="holdings_editor",
+        key="holdings_editor_v21",
     )
-    st.session_state.holdings = clean_holdings(edited) if edited is not None else st.session_state.holdings
-    risk_panel(st.session_state.holdings)
-    if not st.session_state.holdings.empty:
-        csv = st.session_state.holdings.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("下载持仓CSV", csv, "holdings.csv", "text/csv")
+    st.session_state.holdings = clean_holdings(edited)
+    _holdings_to_url(st.session_state.holdings)
+    st.caption("✅ 持仓已自动保存；刷新页面会恢复。")
+
+    h = st.session_state.holdings
+    if not h.empty:
+        equity_now = float(cfg["account"]["equity"])
+        total_mv = float(h["market_value"].sum())
+        total_pnl = float(h["pnl"].sum())
+        cash_est = equity_now - total_mv
+        c1, c2, c3 = st.columns(3)
+        c1.metric("持仓市值", f"¥{total_mv:,.0f}")
+        c2.metric("持仓盈亏", f"¥{total_pnl:+,.2f}")
+        c3.metric("现金余量", f"¥{cash_est:,.0f}")
+
+        risk_panel(h)
+
+        st.markdown("### 📌 自动操作建议")
+        advice = holding_action_table(h)
+        st.dataframe(advice, use_container_width=True, hide_index=True)
+
+        st.caption("“成本风险线”只是没有实时ATR时的6%回撤参考；若已运行行情评分，以“评分止损”和市场结构为优先。")
+        csv = h.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("下载完整持仓CSV", csv, "holdings_full.csv", "text/csv")
+        advice_csv = advice.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("下载操作建议CSV", advice_csv, "holding_actions.csv", "text/csv")
+    else:
+        risk_panel(h)
+
 
 with tab1:
     st.subheader("今日候选")
