@@ -23,11 +23,24 @@ def _is_excluded(symbol: str, config: dict) -> bool:
 def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame | None = None, model_path: str | None = None) -> tuple[pd.DataFrame, dict]:
     feat = add_features(market_df)
     latest_date = feat["date"].max()
-    latest = feat[feat["date"] == latest_date].copy()
-    latest = latest[~latest["symbol"].map(lambda s: _is_excluded(s, config))].copy()
+    latest = feat.loc[feat["date"] == latest_date].copy()
+
+    # pandas 2.x / object dtype 下，直接对 object 布尔列使用 ~ 可能得到 -1/-2，
+    # 随后被 DataFrame 当成“列名”索引，触发 None of [Index([-1,...])] are in the [columns]。
+    excluded_mask = latest["symbol"].astype(str).map(lambda x: bool(_is_excluded(x, config))).fillna(False).astype(bool)
+    latest = latest.loc[~excluded_mask].copy()
+
     if config["universe"].get("exclude_st", True):
-        latest = latest[~latest["is_st"].fillna(False)].copy()
-    latest = latest[(latest["close"] >= config["universe"]["min_price"]) & (latest["close"] <= config["universe"]["max_price"])]
+        st_mask = latest["is_st"].fillna(False).map(bool).astype(bool)
+        latest = latest.loc[~st_mask].copy()
+    price_mask = (
+        (pd.to_numeric(latest["close"], errors="coerce") >= config["universe"]["min_price"])
+        & (pd.to_numeric(latest["close"], errors="coerce") <= config["universe"]["max_price"])
+    ).fillna(False).astype(bool)
+    latest = latest.loc[price_mask].copy()
+
+    if latest.empty:
+        raise ValueError("最新交易日过滤后没有可评分股票，请检查数据日期、市场范围或排除条件。")
 
     parts = latest.apply(score_row, axis=1, result_type="expand")
     latest = pd.concat([latest.reset_index(drop=True), parts.reset_index(drop=True)], axis=1)
@@ -60,7 +73,8 @@ def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame
                         np.where(latest["combined_score"] >= watch_th, "WATCH", "AVOID"))
 
     # 优先普通趋势分，首板则额外要求 relay 分数
-    is_relay = latest["is_limit_up"].fillna(False) | (latest["ret_1"] >= 0.095)
+    relay_flag = latest["is_limit_up"].fillna(False).map(bool).astype(bool)
+    is_relay = relay_flag | (pd.to_numeric(latest["ret_1"], errors="coerce").fillna(-999) >= 0.095)
     latest.loc[is_relay & (latest["relay_score"] < 50), "signal"] = "AVOID_RELAY"
     latest.loc[is_relay & (latest["relay_score"] >= 70), "signal"] = "RELAY_CANDIDATE"
 
