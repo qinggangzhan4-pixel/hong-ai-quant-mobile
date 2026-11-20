@@ -531,32 +531,47 @@ with tab1:
 
     with st.expander("⚡ 实时 A 股扫描", expanded=True):
         st.caption("一键抓取全A实时快照 → 主板预筛 → 拉取近期历史 → 自动评分。科创板/创业板/北交所按当前配置排除。")
-        scan_n = st.selectbox("深度评分股票数", [20, 30, 40, 50], index=1)
+        scan_n = st.selectbox("深度评分股票数", [10, 20, 30, 40], index=1)
         if st.button("⚡ 获取实时行情并自动量化", type="primary", use_container_width=True):
+            status = st.status("已收到请求：正在连接实时 A 股行情……", expanded=True)
             try:
-                with st.spinner("正在抓取全A行情并进行两阶段量化，通常需要几十秒……"):
-                    market, snapshot, selected, meta = fetch_live_a_scan(
-                        preselect_n=int(scan_n),
-                        history_calendar_days=150,
-                        max_workers=4,
-                    )
-                    st.session_state.market = market
-                    st.session_state.live_snapshot = snapshot
-                    st.session_state.live_meta = meta
-                    h = _refresh_holdings_prices(snapshot)
+                status.write("① 抓取全 A 股实时快照")
+                status.write("② 主板快速预筛")
+                status.write(f"③ 对前 {int(scan_n)} 只拉历史并计算 MA / ATR / RSI / 量价")
+                market, snapshot, selected, meta = fetch_live_a_scan(
+                    preselect_n=int(scan_n),
+                    history_calendar_days=150,
+                    max_workers=4,
+                )
+                st.session_state.market = market
+                st.session_state.live_snapshot = snapshot
+                st.session_state.live_meta = meta
 
-                    scores, _ = score_universe(
-                        market,
-                        cfg,
-                        h,
-                        str(MODEL_PATH) if MODEL_PATH.exists() else None,
-                    )
-                    scores = _apply_live_market_context(scores, meta)
-                    st.session_state.scores = scores
-                st.success(f"实时扫描完成：全市场 {meta.get('count', 0)} 只，预筛 {meta.get('preselected', 0)} 只，深度评分 {len(scores)} 只。")
+                status.write("④ 更新当前持仓现价")
+                h = _refresh_holdings_prices(snapshot)
+
+                status.write("⑤ 运行量化评分与仓位风控")
+                scores, _ = score_universe(
+                    market,
+                    cfg,
+                    h,
+                    str(MODEL_PATH) if MODEL_PATH.exists() else None,
+                )
+                scores = _apply_live_market_context(scores, meta)
+                st.session_state.scores = scores
+                status.update(
+                    label=f"完成：{len(scores)} 只深度评分，用时 {meta.get('elapsed_seconds','—')} 秒",
+                    state="complete",
+                    expanded=False,
+                )
+                st.success(
+                    f"实时扫描完成：全市场 {meta.get('count', 0)} 只，预筛 {meta.get('preselected', 0)} 只，"
+                    f"深度评分 {len(scores)} 只。"
+                )
             except Exception as e:
+                status.update(label="实时扫描未完成", state="error", expanded=True)
                 st.error(f"实时扫描失败：{e}")
-                st.caption("行情接口偶尔会限流，过几十秒重试即可；不会影响你已保存的持仓。")
+                st.caption("现在所有实时请求都设置了超时，不会再无限卡住。接口忙时等十几秒后重试即可。")
 
         meta = st.session_state.live_meta
         if meta:
