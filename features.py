@@ -60,6 +60,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         g["atr14_pct"] = g["atr14"] / g["close"]
         g["rsi14"] = _rsi(g["close"], 14)
         prior_high20 = g["high"].shift(1).rolling(20).max()
+        g["prior_high20"] = prior_high20
         rolling_high20 = g["high"].rolling(20).max()
         rolling_low60 = g["low"].rolling(60).min()
         rolling_high60 = g["high"].rolling(60).max()
