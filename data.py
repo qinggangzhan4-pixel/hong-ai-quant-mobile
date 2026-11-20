@@ -71,7 +71,7 @@ def _get_json(url: str, params: dict, timeout: float = 12.0) -> dict:
 
 
 def fetch_realtime_a_snapshot() -> pd.DataFrame:
-    """抓取全 A 股公开网页实时快照（东方财富）。
+    """抓取全 A 股公开网页实时快照（东方财富），自动分页拿全市场。
 
     这不是券商逐笔数据。盘中可刷新；午休/收盘时返回最近快照。
     """
@@ -79,9 +79,8 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
         "f12","f14","f2","f3","f4","f5","f6","f7","f15","f16","f17","f18",
         "f10","f8","f9","f23","f20","f21","f22","f11"
     ]
-    params = {
-        "pn": 1,
-        "pz": 6000,
+    base_params = {
+        "pz": 100,
         "po": 1,
         "np": 1,
         "fltt": 2,
@@ -90,13 +89,42 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
         "fields": ",".join(fields),
     }
-    j = _get_json("https://push2.eastmoney.com/api/qt/clist/get", params, timeout=12)
-    diff = ((j.get("data") or {}).get("diff") or [])
-    if not diff:
+
+    # 第一页先拿总数。东方财富这个接口单页常被限制在约100只，
+    # 所以原先只请求一页会误把“涨幅前100”当成“全市场”。
+    p1 = dict(base_params)
+    p1["pn"] = 1
+    j1 = _get_json("https://push2.eastmoney.com/api/qt/clist/get", p1, timeout=10)
+    data1 = j1.get("data") or {}
+    first = data1.get("diff") or []
+    total = int(data1.get("total") or len(first))
+    if not first:
         raise RuntimeError("实时 A 股快照为空，请稍后重试。")
 
+    page_size = max(1, len(first))
+    pages = max(1, int(np.ceil(total / page_size)))
+
+    all_diff = list(first)
+
+    def fetch_page(pn: int):
+        p = dict(base_params)
+        p["pn"] = pn
+        j = _get_json("https://push2.eastmoney.com/api/qt/clist/get", p, timeout=10)
+        return ((j.get("data") or {}).get("diff") or [])
+
+    # 并发补齐后续页面，避免手机端一页页等。
+    if pages > 1:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {pool.submit(fetch_page, pn): pn for pn in range(2, pages + 1)}
+            for f in as_completed(futs):
+                try:
+                    all_diff.extend(f.result())
+                except Exception:
+                    # 少量页面失败时保留已拿到的数据；最终会在 meta 里显示实际数量。
+                    pass
+
     rows = []
-    for d in diff:
+    for d in all_diff:
         rows.append({
             "symbol": d.get("f12"),
             "name": d.get("f14"),
@@ -120,7 +148,11 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
             "change_5m": d.get("f11"),
         })
     out = pd.DataFrame(rows)
+    if out.empty:
+        raise RuntimeError("实时 A 股快照解析为空，请稍后重试。")
+
     out["symbol"] = out["symbol"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+    out = out.drop_duplicates(subset=["symbol"], keep="first").reset_index(drop=True)
     out["name"] = out["name"].fillna("").astype(str)
     numeric = [
         "close","pct_change","price_change","volume","amount","amplitude","high","low","open",
@@ -135,7 +167,6 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
     out["is_limit_up"] = out["pct_change"].fillna(-999) >= 9.5
     out = out[out["close"].fillna(0) > 0].reset_index(drop=True)
     return out
-
 
 def fetch_realtime_etf_snapshot() -> pd.DataFrame:
     """ETF 快照。当前主扫描不依赖它；仅用于刷新持仓 ETF 现价。失败会由调用方忽略。"""
