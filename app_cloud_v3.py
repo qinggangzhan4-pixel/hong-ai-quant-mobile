@@ -1,9 +1,6 @@
-# Streamlit Cloud 手机上传修复入口 v3
-# 修复：
-# 1) iPhone/GitHub 上传后 ai_quant/、examples/、models/ 文件夹被“拍平”
-# 2) 空持仓时 clean_holdings() 返回 None 导致 .empty 报错
-# 3) 云端 scikit-learn 与旧 model.joblib 不兼容（No module named '_loss'）
-#    -> 云端先自动关闭旧AI模型，只运行规则量化；后续可在云端重新训练AI模型
+# Streamlit Cloud 手机上传修复入口 v4
+# v4 新增：持仓在刷新页面后自动恢复（通过浏览器 URL 参数保存，不写服务器文件）。
+# 注意：URL 参数只是编码，不是加密；不要把带 ?holdings=... 的完整链接分享给别人。
 
 from pathlib import Path
 import sys
@@ -37,20 +34,6 @@ for name in (
 ):
     ensure_dir_file("examples", name)
 
-# 注意：v3 不再把旧 model.joblib 复制到 models/，避免云端版本不兼容。
-# 如果之前运行时已创建 models/model.joblib，也通过 app.py 源码补丁禁用它。
-
-# ---------- 修复当前会话里已经变成 None 的 holdings ----------
-try:
-    import pandas as pd
-    import streamlit as st
-    if "holdings" in st.session_state and st.session_state.holdings is None:
-        st.session_state.holdings = pd.DataFrame(
-            columns=["symbol", "name", "industry", "market_value"]
-        )
-except Exception:
-    pass
-
 # ---------- 执行原 app.py，并在运行前打补丁 ----------
 app_file = ROOT / "app.py"
 if not app_file.exists():
@@ -58,7 +41,13 @@ if not app_file.exists():
 
 source = app_file.read_text(encoding="utf-8")
 
-# 修复 clean_holdings 空持仓返回 None
+# 1) 增加 base64，用 URL 参数持久化持仓
+source = source.replace(
+    "import json\nimport pandas as pd",
+    "import json\nimport base64\nimport pandas as pd",
+)
+
+# 2) 修复空持仓返回 None
 old_clean = (
     'def clean_holdings(df):\n'
     '    if df is None or len(df) == 0:\n'
@@ -71,17 +60,68 @@ new_clean = (
 )
 source = source.replace(old_clean, new_clean)
 
-# 再加一道保险
 source = source.replace(
     '    if not st.session_state.holdings.empty:\n',
     '    if st.session_state.holdings is not None and not st.session_state.holdings.empty:\n'
 )
 
-# 禁用旧的、不兼容的 joblib 模型文件。
-# score_universe 检测不到模型文件时会自动退回规则评分，AI概率显示“未启用”。
+# 3) 禁用旧的、不兼容的 joblib AI 模型；规则量化仍正常运行
 source = source.replace(
     'MODEL_PATH = ROOT / "models" / "model.joblib"',
     'MODEL_PATH = ROOT / "models" / "__cloud_ai_disabled_until_retrain__.joblib"'
 )
+
+# 4) 插入持仓读写函数：保存到当前浏览器 URL 参数
+marker = "# ---------------- header ----------------\n"
+persist_helpers = r"""
+# ---------------- browser persistence ----------------
+def _holdings_from_url():
+    try:
+        token = st.query_params.get("holdings", "")
+        if not token:
+            return pd.DataFrame(columns=["symbol","name","industry","market_value"])
+        pad = "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8")
+        rows = json.loads(raw)
+        df = pd.DataFrame(rows)
+        return clean_holdings(df)
+    except Exception:
+        return pd.DataFrame(columns=["symbol","name","industry","market_value"])
+
+
+def _holdings_to_url(df):
+    try:
+        h = clean_holdings(df)
+        if h is None or h.empty:
+            if "holdings" in st.query_params:
+                del st.query_params["holdings"]
+            return
+        cols = [c for c in ["symbol","name","industry","market_value"] if c in h.columns]
+        payload = json.dumps(h[cols].to_dict("records"), ensure_ascii=False, separators=(",", ":"))
+        token = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+        if st.query_params.get("holdings", "") != token:
+            st.query_params["holdings"] = token
+    except Exception:
+        pass
+
+"""
+source = source.replace(marker, persist_helpers + marker)
+
+# 5) 首次打开 / 刷新时，从 URL 恢复持仓
+source = source.replace(
+    'if "holdings" not in st.session_state:\n'
+    '    st.session_state.holdings = pd.DataFrame(columns=["symbol","name","industry","market_value"])',
+    'if "holdings" not in st.session_state:\n'
+    '    st.session_state.holdings = _holdings_from_url()'
+)
+
+# 6) 每次编辑后自动保存到 URL；刷新后自动回来
+old_assign = '    st.session_state.holdings = clean_holdings(edited) if edited is not None else st.session_state.holdings\n'
+new_assign = (
+    '    st.session_state.holdings = clean_holdings(edited) if edited is not None else st.session_state.holdings\n'
+    '    _holdings_to_url(st.session_state.holdings)\n'
+    '    st.caption("✅ 持仓已自动保存；刷新页面会恢复。请勿分享带 holdings 参数的完整网址。")\n'
+)
+source = source.replace(old_assign, new_assign)
 
 exec(compile(source, str(app_file), "exec"), globals(), globals())
