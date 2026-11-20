@@ -18,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.4.3",
+    page_title="洪老师AI量化 v2.4.4",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -85,11 +85,14 @@ def load_demo():
 HOLDING_INPUT_COLUMNS = ["symbol","name","industry","shares","available_shares","cost_price","current_price"]
 HOLDING_COLUMNS = HOLDING_INPUT_COLUMNS + ["market_value","pnl","pnl_pct"]
 
+CURRENT_HOLDINGS_REV = "20261120_1533"
+
 DEFAULT_HOLDINGS = [
-    {"symbol":"600584","name":"长电科技","industry":"半导体","shares":100,"available_shares":100,"cost_price":54.811,"current_price":51.910},
-    {"symbol":"002945","name":"华林证券","industry":"金融","shares":200,"available_shares":0,"cost_price":14.435,"current_price":14.450},
-    {"symbol":"600901","name":"江苏金租","industry":"金融","shares":3700,"available_shares":2900,"cost_price":7.768,"current_price":7.720},
-    {"symbol":"516310","name":"银行ETF易方达","industry":"金融","shares":2100,"available_shares":1900,"cost_price":1.287,"current_price":1.508},
+    {"symbol":"600919","name":"江苏银行","industry":"金融","shares":400,"available_shares":0,"cost_price":13.453,"current_price":13.660},
+    {"symbol":"600584","name":"长电科技","industry":"半导体","shares":100,"available_shares":100,"cost_price":54.811,"current_price":50.200},
+    {"symbol":"002945","name":"华林证券","industry":"金融","shares":200,"available_shares":0,"cost_price":14.435,"current_price":14.150},
+    {"symbol":"600901","name":"江苏金租","industry":"金融","shares":1700,"available_shares":1200,"cost_price":7.748,"current_price":7.820},
+    {"symbol":"516310","name":"银行ETF易方达","industry":"金融","shares":1100,"available_shares":900,"cost_price":1.078,"current_price":1.533},
 ]
 
 
@@ -119,8 +122,10 @@ def _encode_holdings_rows(rows):
 
 def _holdings_from_url():
     try:
+        rev = st.query_params.get("holdings_rev", "")
         token = st.query_params.get("holdings", "")
-        if not token:
+        # 用户刚明确要求更新到最新截图时，用版本号覆盖旧网址里的历史持仓一次。
+        if rev != CURRENT_HOLDINGS_REV or not token:
             return clean_holdings(pd.DataFrame(DEFAULT_HOLDINGS))
         pad = "=" * (-len(token) % 4)
         raw = base64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8")
@@ -139,6 +144,8 @@ def _holdings_to_url(df):
         token = _encode_holdings_rows(rows)
         if st.query_params.get("holdings", "") != token:
             st.query_params["holdings"] = token
+        if st.query_params.get("holdings_rev", "") != CURRENT_HOLDINGS_REV:
+            st.query_params["holdings_rev"] = CURRENT_HOLDINGS_REV
     except Exception:
         pass
 
@@ -532,7 +539,7 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.4.3")
+st.title("📈 洪老师 AI 量化 v2.4.4")
 st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
 st.caption("Build: 2026-11-20-paged-scan ｜ 东财实时行情改为分页并发+失败页重试")
 if st.session_state.get("auto_scan_error"):
