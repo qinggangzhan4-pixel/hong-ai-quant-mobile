@@ -18,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.4.2",
+    page_title="洪老师AI量化 v2.4.3",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -532,9 +532,9 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.4.2")
+st.title("📈 洪老师 AI 量化 v2.4.3")
 st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
-st.caption("Build: 2026-11-20-fast-scan ｜ 实时全A改为单请求，已移除阻塞式自动扫描")
+st.caption("Build: 2026-11-20-paged-scan ｜ 东财实时行情改为分页并发+失败页重试")
 if st.session_state.get("auto_scan_error"):
     st.warning(f"自动评分未完成：{st.session_state.auto_scan_error}")
 
@@ -595,6 +595,11 @@ with tab4:
                 preselect_n=int(scan_count),
                 history_calendar_days=150,
                 max_workers=4,
+            )
+            status.write(
+                f"✓ 实时行情：{len(snapshot):,}只 ｜ "
+                f"接口总数约{snapshot.attrs.get('source_total', len(snapshot)):,}只 ｜ "
+                f"{snapshot.attrs.get('total_pages', 1)}页"
             )
             st.session_state.market = market
             st.session_state.live_snapshot = snapshot
@@ -786,6 +791,11 @@ with tab1:
                     preselect_n=int(scan_n),
                     history_calendar_days=150,
                     max_workers=4,
+                )
+                status.write(
+                    f"✓ 实时行情：{len(snapshot):,}只 ｜ "
+                    f"接口总数约{snapshot.attrs.get('source_total', len(snapshot)):,}只 ｜ "
+                    f"{snapshot.attrs.get('total_pages', 1)}页"
                 )
                 st.session_state.market = market
                 st.session_state.live_snapshot = snapshot
