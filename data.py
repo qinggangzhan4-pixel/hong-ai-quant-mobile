@@ -71,21 +71,19 @@ def _get_json(url: str, params: dict, timeout: float = 12.0) -> dict:
 
 
 def fetch_realtime_a_snapshot() -> pd.DataFrame:
-    """一次请求抓取沪深京 A 股实时快照。
+    """分页抓取沪深京 A 股实时快照。
 
-    使用东方财富与 AkShare 同类参数：np=2 + pz=20000。
-    这样避免旧版“60多页并发分页”把 Streamlit 手机页面卡住。
-    不是券商逐笔；盘中为公开网页实时快照。
+    东财 clist 接口现在会限制单页返回数量，因此不能再用 pz=20000 假设一次拿全。
+    这里按 200/页并发抓取全部页面，并对失败页重试一次。
     """
     fields = [
         "f12","f14","f2","f3","f4","f5","f6","f7","f15","f16","f17","f18",
         "f10","f8","f9","f23","f20","f21","f22","f11"
     ]
-    params = {
-        "pn": 1,
-        "pz": 20000,
+    base_params = {
+        "pz": 200,
         "po": 1,
-        "np": 2,
+        "np": 1,
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2,
         "invt": 2,
@@ -94,47 +92,89 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
         "fields": ",".join(fields),
     }
 
-    # 82 节点是 AkShare 长期使用的东财行情节点；单请求避免几十页等待。
-    j = _get_json("https://82.push2.eastmoney.com/api/qt/clist/get", params, timeout=12)
-    data = j.get("data") or {}
-    diff = data.get("diff") or []
+    def fetch_page(pn: int, timeout: float = 7.0):
+        params = dict(base_params)
+        params["pn"] = int(pn)
+        j = _get_json("https://82.push2.eastmoney.com/api/qt/clist/get", params, timeout=timeout)
+        data = j.get("data") or {}
+        diff = data.get("diff") or []
+        if isinstance(diff, dict):
+            records = list(diff.values())
+        elif isinstance(diff, list):
+            records = diff
+        else:
+            records = []
+        return records, int(data.get("total") or 0)
 
-    # 不同时间东财可能返回 list，也可能返回 {"0": {...}, ...}。
-    if isinstance(diff, dict):
-        records = list(diff.values())
-    elif isinstance(diff, list):
-        records = diff
-    else:
-        records = []
+    first, total = fetch_page(1, timeout=8.0)
+    if not first:
+        raise RuntimeError("实时 A 股第一页为空，请稍后重试。")
 
-    if not records:
-        raise RuntimeError("实时 A 股快照为空，请稍后重试。")
+    # 接口可能实际只给100/页，所以以“第一页实际数量”作为真实页容量。
+    actual_page_size = max(1, len(first))
+    if total <= 0:
+        total = actual_page_size
+    total_pages = max(1, int(np.ceil(total / actual_page_size)))
+
+    page_records = {1: first}
+    failed_pages = []
+
+    if total_pages > 1:
+        workers = min(12, total_pages - 1)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(fetch_page, pn, 7.0): pn for pn in range(2, total_pages + 1)}
+            for f in as_completed(futs):
+                pn = futs[f]
+                try:
+                    records, _ = f.result()
+                    if records:
+                        page_records[pn] = records
+                    else:
+                        failed_pages.append(pn)
+                except Exception:
+                    failed_pages.append(pn)
+
+    # 失败页再重试一次，避免偶发丢页。
+    retry_failed = []
+    for pn in failed_pages:
+        try:
+            records, _ = fetch_page(pn, timeout=6.0)
+            if records:
+                page_records[pn] = records
+            else:
+                retry_failed.append(pn)
+        except Exception:
+            retry_failed.append(pn)
+
+    all_records = []
+    for pn in sorted(page_records):
+        all_records.extend(page_records[pn])
 
     rows = []
-    for d in records:
-        if not isinstance(d, dict):
+    for item in all_records:
+        if not isinstance(item, dict):
             continue
         rows.append({
-            "symbol": d.get("f12"),
-            "name": d.get("f14"),
-            "close": d.get("f2"),
-            "pct_change": d.get("f3"),
-            "price_change": d.get("f4"),
-            "volume": d.get("f5"),
-            "amount": d.get("f6"),
-            "amplitude": d.get("f7"),
-            "high": d.get("f15"),
-            "low": d.get("f16"),
-            "open": d.get("f17"),
-            "prev_close": d.get("f18"),
-            "live_volume_ratio": d.get("f10"),
-            "turnover_rate": d.get("f8"),
-            "pe_ttm": d.get("f9"),
-            "pb": d.get("f23"),
-            "market_cap": d.get("f20"),
-            "float_market_cap": d.get("f21"),
-            "speed": d.get("f22"),
-            "change_5m": d.get("f11"),
+            "symbol": item.get("f12"),
+            "name": item.get("f14"),
+            "close": item.get("f2"),
+            "pct_change": item.get("f3"),
+            "price_change": item.get("f4"),
+            "volume": item.get("f5"),
+            "amount": item.get("f6"),
+            "amplitude": item.get("f7"),
+            "high": item.get("f15"),
+            "low": item.get("f16"),
+            "open": item.get("f17"),
+            "prev_close": item.get("f18"),
+            "live_volume_ratio": item.get("f10"),
+            "turnover_rate": item.get("f8"),
+            "pe_ttm": item.get("f9"),
+            "pb": item.get("f23"),
+            "market_cap": item.get("f20"),
+            "float_market_cap": item.get("f21"),
+            "speed": item.get("f22"),
+            "change_5m": item.get("f11"),
         })
 
     out = pd.DataFrame(rows)
@@ -159,9 +199,19 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
     out["is_limit_up"] = out["pct_change"].fillna(-999) >= 9.5
     out = out[out["close"].fillna(0) > 0].reset_index(drop=True)
 
-    # 正常沪深京A股应该是数千只；若只拿到100/200只，明确报错，不再假装是“全市场”。
-    if len(out) < 1000:
-        raise RuntimeError(f"实时接口只返回 {len(out)} 只，未拿到完整市场，请稍后重试。")
+    # 只要拿到的数据明显不完整，就明确报错，不让后续误把残缺行情当“全市场”。
+    completeness = len(out) / max(total, 1)
+    if len(out) < 1000 or completeness < 0.85:
+        raise RuntimeError(
+            f"实时行情不完整：接口总数约 {total} 只，实际拿到 {len(out)} 只，"
+            f"失败页 {len(retry_failed)} 页。请重试。"
+        )
+
+    out.attrs["source_total"] = total
+    out.attrs["actual_count"] = len(out)
+    out.attrs["page_size"] = actual_page_size
+    out.attrs["total_pages"] = total_pages
+    out.attrs["failed_pages"] = retry_failed
     return out
 
 def fetch_realtime_etf_snapshot() -> pd.DataFrame:
