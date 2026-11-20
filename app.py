@@ -18,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.4",
+    page_title="洪老师AI量化 v2.4.1",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -532,7 +532,7 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.4")
+st.title("📈 洪老师 AI 量化 v2.4.1")
 st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
 st.caption("Build: 2026-11-20-fix2 ｜ 已修复 pandas 布尔掩码兼容问题")
 if st.session_state.get("auto_scan_error"):
@@ -609,94 +609,134 @@ def _live_snapshot_table(snapshot, limit=100):
 tab1, tab2, tab3, tab4 = st.tabs(["🏆 今日候选", "🔎 查一只", "💼 我的持仓", "📤 数据"])
 
 with tab4:
-    st.subheader("行情数据")
+    st.subheader("实时量化数据")
+    st.caption("这里不再只是“导入行情”。点击一次后会自动抓行情、拉历史、评分，并直接给出买卖点。")
 
-    st.markdown("### ⚡ 实时全A行情")
-    c_rt1, c_rt2 = st.columns(2)
-    if c_rt1.button("导入实时全A行情", type="primary", use_container_width=True):
+    scan_count = st.selectbox("深度评分数量", [20, 30, 40, 50], index=1, key="data_scan_count")
+    if st.button("⚡ 刷新实时行情并生成买卖点", type="primary", use_container_width=True):
+        status = st.status("正在运行实时量化……", expanded=True)
         try:
-            with st.spinner("正在导入实时A股行情……"):
-                snap = fetch_realtime_a_snapshot()
-                st.session_state.live_snapshot = snap
-            st.success(f"已导入实时行情：{len(snap):,} 只股票。")
-        except Exception as e:
-            st.error(f"实时行情导入失败：{e}")
+            status.write("① 抓取全A实时行情")
+            status.write("② 主板预筛")
+            status.write(f"③ 对前 {int(scan_count)} 只拉取约150天历史")
+            market, snapshot, selected, meta = fetch_live_a_scan(
+                preselect_n=int(scan_count),
+                history_calendar_days=150,
+                max_workers=4,
+            )
+            st.session_state.market = market
+            st.session_state.live_snapshot = snapshot
+            st.session_state.live_selected = selected
+            st.session_state.live_meta = meta
 
-    if c_rt2.button("实时行情 + 自动量化", use_container_width=True):
-        try:
-            with st.spinner("正在导入实时行情并运行量化……"):
-                market, snapshot, selected, meta = fetch_live_a_scan(
-                    preselect_n=20,
-                    history_calendar_days=150,
-                    max_workers=4,
-                )
-                st.session_state.market = market
-                st.session_state.live_snapshot = snapshot
-                st.session_state.live_selected = selected
-                st.session_state.live_meta = meta
-                h = _refresh_holdings_prices(snapshot)
-                scores, _ = score_universe(
-                    market,
-                    cfg,
-                    h,
-                    str(MODEL_PATH) if MODEL_PATH.exists() else None,
-                )
-                st.session_state.scores = _apply_live_market_context(scores, meta)
-            st.success(f"完成：实时行情 {len(snapshot):,} 只，深度评分 {len(st.session_state.scores)} 只。")
-        except Exception as e:
-            st.error(f"导入并评分失败：{e}")
+            status.write("④ 更新持仓现价")
+            h = _refresh_holdings_prices(snapshot)
 
-    if st.session_state.live_snapshot is not None:
-        snap = st.session_state.live_snapshot
-        st.caption(f"当前实时快照：{len(snap):,} 只股票")
-        st.dataframe(_live_snapshot_table(snap, 100), use_container_width=True, hide_index=True)
-        live_csv = snap.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("下载完整实时行情CSV", live_csv, "a_share_realtime.csv", "text/csv")
+            status.write("⑤ 计算综合评分、买点、止损和止盈")
+            scores, _ = score_universe(
+                market,
+                cfg,
+                h,
+                str(MODEL_PATH) if MODEL_PATH.exists() else None,
+            )
+            scores = _apply_live_market_context(scores, meta)
+            st.session_state.scores = scores
+
+            status.update(
+                label=f"完成：全市场 {len(snapshot):,} 只，深度评分 {len(scores)} 只",
+                state="complete",
+                expanded=False,
+            )
+            st.success("实时量化完成，结果已经显示在下面。")
+        except Exception as e:
+            status.update(label="实时量化失败", state="error", expanded=True)
+            st.error(f"实时量化失败：{e}")
+
+    meta = st.session_state.live_meta
+    snap = st.session_state.live_snapshot
+    scores = st.session_state.scores
+
+    if meta:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("上涨/下跌", f"{meta.get('up',0)}/{meta.get('down',0)}")
+        c2.metric("涨停/跌停", f"{meta.get('limit_up',0)}/{meta.get('limit_down',0)}")
+        c3.metric("上涨占比", f"{meta.get('up_ratio',0)*100:.1f}%")
+        st.caption(
+            f"扫描时间：{meta.get('scan_time','')} ｜ 平均涨跌：{meta.get('avg_pct_change',0):+.2f}%"
+        )
+
+    if snap is not None and len(snap):
+        st.markdown("### 🔥 实时涨幅榜")
+        st.dataframe(_live_snapshot_table(snap, 30), use_container_width=True, hide_index=True)
+
+    if scores is not None and len(scores):
+        st.markdown("### 🎯 量化候选与买卖点")
+        rows = []
+        for _, rr in scores.head(20).iterrows():
+            lv = trade_levels(rr)
+            rows.append({
+                "代码": str(rr.get("symbol","")).zfill(6),
+                "名称": rr.get("name",""),
+                "综合分": round(float(rr.get("combined_score", rr.get("rule_score", 0))), 1),
+                "状态": lv["status"],
+                "现价": round(float(rr.get("close", 0)), 3),
+                "回踩下沿": None if pd.isna(lv["buy_low"]) else round(float(lv["buy_low"]), 3),
+                "回踩上沿": None if pd.isna(lv["buy_high"]) else round(float(lv["buy_high"]), 3),
+                "突破确认": None if pd.isna(lv["breakout"]) else round(float(lv["breakout"]), 3),
+                "止损": None if pd.isna(lv["stop"]) else round(float(lv["stop"]), 3),
+                "止盈1": None if pd.isna(lv["tp1"]) else round(float(lv["tp1"]), 3),
+                "止盈2": None if pd.isna(lv["tp2"]) else round(float(lv["tp2"]), 3),
+                "首仓股数": int(rr.get("suggested_shares",0) or 0),
+            })
+        result_df = pd.DataFrame(rows)
+        st.dataframe(result_df, use_container_width=True, hide_index=True)
+        st.caption("优先看“✅回踩买点 / ✅突破买点”；“⏳等待触发”不要追；“🔥过热勿追 / ❌不买”直接跳过。")
+
+        top_ready = result_df[result_df["状态"].astype(str).str.startswith("✅")]
+        if len(top_ready):
+            st.markdown("### ✅ 当前已触发买点")
+            st.dataframe(top_ready, use_container_width=True, hide_index=True)
+        else:
+            st.info("当前没有股票触发买点。评分高但没到价格触发条件时，继续等。")
 
     st.divider()
-    st.markdown("### 📄 CSV / 演示数据")
-    st.write("也可以上传标准化 CSV，或载入演示数据。")
-    uploaded = st.file_uploader("行情CSV", type=["csv"], key="market_file")
-    c1, c2 = st.columns(2)
-    use_demo = c1.button("载入演示数据")
-    clear_data = c2.button("清空数据")
-    if uploaded is not None:
-        try:
-            st.session_state.market = pd.read_csv(uploaded, dtype={"symbol": str})
-            st.success(f"已读取 {len(st.session_state.market):,} 行行情。")
-        except Exception as e:
-            st.error(f"读取失败：{e}")
-    if use_demo:
-        st.session_state.market = load_demo()
-        st.success("已载入演示数据。")
-    if clear_data:
-        st.session_state.market = None
-        st.session_state.scores = None
-        st.session_state.live_snapshot = None
-        st.session_state.live_selected = None
-        st.session_state.live_meta = None
-        st.rerun()
-
-    if st.session_state.market is not None:
-        st.markdown("### 🧮 当前评分数据集")
-        st.dataframe(st.session_state.market.tail(20), use_container_width=True, hide_index=True)
-        if st.button("🚀 运行全市场评分", type="primary"):
+    with st.expander("📄 手动CSV / 演示数据", expanded=False):
+        uploaded = st.file_uploader("行情CSV", type=["csv"], key="market_file")
+        c1, c2 = st.columns(2)
+        use_demo = c1.button("载入演示数据")
+        clear_data = c2.button("清空数据")
+        if uploaded is not None:
             try:
-                h = clean_holdings(st.session_state.holdings)
-                scores, _ = score_universe(
-                    st.session_state.market,
-                    cfg,
-                    h,
-                    str(MODEL_PATH) if MODEL_PATH.exists() else None,
-                )
-                st.session_state.scores = scores
-                st.success(f"完成：{len(scores)} 只股票已评分。")
+                st.session_state.market = pd.read_csv(uploaded, dtype={"symbol": str})
+                st.success(f"已读取 {len(st.session_state.market):,} 行行情。")
             except Exception as e:
-                st.error(f"评分失败：{e}")
+                st.error(f"读取失败：{e}")
+        if use_demo:
+            st.session_state.market = load_demo()
+            st.success("已载入演示数据。")
+        if clear_data:
+            st.session_state.market = None
+            st.session_state.scores = None
+            st.session_state.live_snapshot = None
+            st.session_state.live_selected = None
+            st.session_state.live_meta = None
+            st.rerun()
 
-    st.divider()
-    st.markdown("**最少字段：** `date,symbol,open,high,low,close,volume`")
-    st.caption("行业、PE/PB/ROE、资金流、竞价、换手等字段越完整，评分越有意义；缺失字段不会伪造。")
+        if st.session_state.market is not None:
+            st.dataframe(st.session_state.market.tail(20), use_container_width=True, hide_index=True)
+            if st.button("🚀 对当前数据运行评分", type="primary"):
+                try:
+                    h = clean_holdings(st.session_state.holdings)
+                    scores, _ = score_universe(
+                        st.session_state.market,
+                        cfg,
+                        h,
+                        str(MODEL_PATH) if MODEL_PATH.exists() else None,
+                    )
+                    st.session_state.scores = scores
+                    st.success(f"完成：{len(scores)} 只股票已评分。")
+                except Exception as e:
+                    st.error(f"评分失败：{e}")
 
 with tab3:
     st.subheader("我的持仓")
