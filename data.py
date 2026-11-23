@@ -9,6 +9,7 @@ import time
 import numpy as np
 import pandas as pd
 import requests
+from urllib.parse import urlsplit, urlunsplit
 
 
 def load_market_csv(path: str) -> pd.DataFrame:
@@ -42,32 +43,52 @@ def _eastmoney_secid(symbol: str) -> str:
 
 
 def _get_json(url: str, params: dict, timeout: float = 12.0) -> dict:
-    last_err = None
+    """请求东方财富公开 JSON 接口。
+
+    只使用标准域名，不再拼接 82.7.push2.eastmoney.com 这类错误节点域名。
+    旧逻辑对已带 82. 前缀的 URL 再做字符串替换，会生成 82.7.push2...
+    从而触发 SSL Hostname mismatch。
+    """
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+
+    # 清除历史节点前缀，统一回官方主机名；不关闭 SSL 证书校验。
+    if host.endswith(".push2.eastmoney.com"):
+        host = "push2.eastmoney.com"
+    elif host.endswith(".push2his.eastmoney.com"):
+        host = "push2his.eastmoney.com"
+
+    netloc = host
+    if parsed.port:
+        netloc = f"{host}:{parsed.port}"
+    request_url = urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": "https://quote.eastmoney.com/",
         "Accept": "application/json,text/plain,*/*",
     }
-    # 多个域名轮换，避免单一节点在云服务器上偶发超时。
-    hosts = [
-        url,
-        url.replace("push2.eastmoney.com", "82.push2.eastmoney.com"),
-        url.replace("push2.eastmoney.com", "7.push2.eastmoney.com"),
-    ]
-    seen = set()
-    for u in hosts:
-        if u in seen:
-            continue
-        seen.add(u)
+
+    last_err = None
+    for attempt in range(3):
         try:
-            r = requests.get(u, params=params, headers=headers, timeout=timeout)
+            r = requests.get(request_url, params=params, headers=headers, timeout=timeout)
             r.raise_for_status()
             data = r.json()
             if isinstance(data, dict):
                 return data
+            raise RuntimeError("行情接口返回的不是 JSON 对象")
+        except requests.exceptions.SSLError as e:
+            # 证书错误不是普通超时，不重试错误域名，更不允许 verify=False 绕过校验。
+            raise RuntimeError(
+                f"东方财富行情接口 SSL 证书校验失败（{host}）：{e}"
+            ) from e
         except Exception as e:
             last_err = e
-    raise RuntimeError(f"公开行情接口暂时无响应：{last_err}")
+            if attempt < 2:
+                time.sleep(0.4 * (attempt + 1))
+
+    raise RuntimeError(f"公开行情接口暂时无响应（{host}）：{last_err}")
 
 
 def fetch_realtime_a_snapshot() -> pd.DataFrame:
@@ -95,7 +116,7 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
     def fetch_page(pn: int, timeout: float = 7.0):
         params = dict(base_params)
         params["pn"] = int(pn)
-        j = _get_json("https://82.push2.eastmoney.com/api/qt/clist/get", params, timeout=timeout)
+        j = _get_json("https://push2.eastmoney.com/api/qt/clist/get", params, timeout=timeout)
         data = j.get("data") or {}
         diff = data.get("diff") or []
         if isinstance(diff, dict):
