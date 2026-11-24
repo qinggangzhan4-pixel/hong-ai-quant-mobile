@@ -85,14 +85,15 @@ def load_demo():
 HOLDING_INPUT_COLUMNS = ["symbol","name","industry","shares","available_shares","cost_price","current_price"]
 HOLDING_COLUMNS = HOLDING_INPUT_COLUMNS + ["market_value","pnl","pnl_pct"]
 
-CURRENT_HOLDINGS_REV = "20261120_1533"
+CURRENT_HOLDINGS_REV = "20261124_1350"
+
+# 516310 保留在账户总市值/现金核对中，但按用户要求不参与持仓评分、行业集中度和止盈止损。
+EXCLUDED_HOLDING_SYMBOLS = {"516310"}
 
 DEFAULT_HOLDINGS = [
-    {"symbol":"600919","name":"江苏银行","industry":"金融","shares":400,"available_shares":0,"cost_price":13.453,"current_price":13.660},
-    {"symbol":"600584","name":"长电科技","industry":"半导体","shares":100,"available_shares":100,"cost_price":54.811,"current_price":50.200},
-    {"symbol":"002945","name":"华林证券","industry":"金融","shares":200,"available_shares":0,"cost_price":14.435,"current_price":14.150},
-    {"symbol":"600901","name":"江苏金租","industry":"金融","shares":1700,"available_shares":1200,"cost_price":7.748,"current_price":7.820},
-    {"symbol":"516310","name":"银行ETF易方达","industry":"金融","shares":1100,"available_shares":900,"cost_price":1.078,"current_price":1.533},
+    {"symbol":"601398","name":"工商银行","industry":"银行","shares":200,"available_shares":0,"cost_price":9.154,"current_price":9.190},
+    {"symbol":"600901","name":"江苏金租","industry":"金融","shares":2200,"available_shares":1300,"cost_price":7.741,"current_price":7.780},
+    {"symbol":"516310","name":"银行ETF易方达（不纳入分析）","industry":"ETF忽略","shares":100,"available_shares":100,"cost_price":-3.448,"current_price":1.523},
 ]
 
 
@@ -113,6 +114,14 @@ def clean_holdings(df):
     h["pnl"] = (h["current_price"] - h["cost_price"]) * h["shares"]
     h["pnl_pct"] = np.where(h["cost_price"] > 0, h["current_price"] / h["cost_price"] - 1, np.nan)
     return h[HOLDING_COLUMNS]
+
+
+def holdings_for_analysis(holdings):
+    """排除用户明确要求忽略的ETF，但保留它在账户总市值核对中。"""
+    h = clean_holdings(holdings)
+    if h.empty:
+        return h
+    return h.loc[~h["symbol"].isin(EXCLUDED_HOLDING_SYMBOLS)].reset_index(drop=True)
 
 
 def _encode_holdings_rows(rows):
@@ -163,7 +172,7 @@ def _floor_lot(shares):
 
 
 def holding_action_table(holdings):
-    h = clean_holdings(holdings)
+    h = holdings_for_analysis(holdings)
     if h.empty:
         return pd.DataFrame()
     equity = float(cfg["account"]["equity"])
@@ -197,12 +206,12 @@ def holding_action_table(holdings):
         reduce_now = min(reduce_for_single, _floor_lot(available))
         industry_excess = max(0.0, ind_value - equity * max_ind)
 
-        risk_line = float(r["cost_price"]) * (1 - max_stop) if float(r["cost_price"]) > 0 else np.nan
-        take_shares = 0
-        if not pd.isna(pnl_pct) and pnl_pct >= tp2:
-            take_shares = min(_floor_lot(shares / 3), _floor_lot(available))
-        elif not pd.isna(pnl_pct) and pnl_pct >= tp1:
-            take_shares = min(_floor_lot(shares / 3), _floor_lot(available))
+        cost_price = float(r["cost_price"])
+        risk_line = cost_price * (1 - max_stop) if cost_price > 0 else np.nan
+        target1_price = cost_price * (1 + tp1) if cost_price > 0 else np.nan
+        target2_price = cost_price * (1 + tp2) if cost_price > 0 else np.nan
+        planned_trim_shares = min(shares, max(100, _floor_lot(shares / 3))) if shares >= 100 else shares
+        sellable_trim_shares = min(planned_trim_shares, _floor_lot(available))
 
         reasons = []
         priority = "持有观察"
@@ -226,9 +235,9 @@ def holding_action_table(holdings):
             elif pnl_pct <= -0.05:
                 reasons.append(f"回撤{pnl_pct*100:.1f}%接近风险线，禁止补仓")
             elif pnl_pct >= tp2:
-                reasons.append(f"浮盈{pnl_pct*100:.1f}%进入第二止盈区，可考虑锁利约{take_shares}股")
+                reasons.append(f"浮盈{pnl_pct*100:.1f}%进入第二止盈区；计划再锁利{planned_trim_shares}股，当前可卖{sellable_trim_shares}股")
             elif pnl_pct >= tp1:
-                reasons.append(f"浮盈{pnl_pct*100:.1f}%进入第一止盈区，可考虑锁利约{take_shares}股")
+                reasons.append(f"浮盈{pnl_pct*100:.1f}%进入第一止盈区；计划锁利{planned_trim_shares}股，当前可卖{sellable_trim_shares}股")
 
         score = score_lookup.get(symbol)
         combined = np.nan
@@ -264,7 +273,11 @@ def holding_action_table(holdings):
             "盈亏%": None if pd.isna(pnl_pct) else round(pnl_pct * 100, 2),
             "仓位%": round(weight * 100, 1),
             "行业仓位%": round(ind_weight * 100, 1),
-            "成本风险线": None if pd.isna(risk_line) else round(risk_line, 3),
+            "成本止损价": None if pd.isna(risk_line) else round(risk_line, 3),
+            "第一止盈价": None if pd.isna(target1_price) else round(target1_price, 3),
+            "第二止盈价": None if pd.isna(target2_price) else round(target2_price, 3),
+            "计划分批卖出股数": int(planned_trim_shares),
+            "当前可卖止盈股数": int(sellable_trim_shares),
             "量化分": None if pd.isna(combined) else round(combined, 1),
             "信号": signal,
             "评分止损": None if pd.isna(score_stop) else round(score_stop, 3),
@@ -365,10 +378,11 @@ def _refresh_holdings_prices(snapshot):
 
 
 def risk_panel(holdings):
-    if holdings is None or holdings.empty:
-        st.info("还没有录入持仓。录入后会检查总仓、单票和单行业集中度。")
+    h = holdings_for_analysis(holdings)
+    if h.empty:
+        st.info("暂无纳入风控计算的持仓（银行ETF 516310 已按要求排除）。")
         return
-    r = portfolio_risk(holdings, float(cfg["account"]["equity"]))
+    r = portfolio_risk(h, float(cfg["account"]["equity"]))
     c1, c2, c3 = st.columns(3)
     c1.metric("总仓", f"{r['total_exposure']*100:.1f}%")
     c2.metric("最大单票", f"{r['max_single_exposure']*100:.1f}%")
@@ -710,7 +724,7 @@ with tab4:
             st.dataframe(st.session_state.market.tail(20), use_container_width=True, hide_index=True)
             if st.button("🚀 对当前数据运行评分", type="primary"):
                 try:
-                    h = clean_holdings(st.session_state.holdings)
+                    h = holdings_for_analysis(st.session_state.holdings)
                     scores, _ = score_universe(
                         st.session_state.market,
                         cfg,
@@ -759,7 +773,7 @@ with tab5:
             watch_scores, _ = score_universe(
                 watch_market,
                 watch_cfg,
-                clean_holdings(st.session_state.holdings),
+                holdings_for_analysis(st.session_state.holdings),
                 None,
             )
             previous_industry = pd.to_numeric(watch_scores["industry_score"], errors="coerce").fillna(10)
@@ -909,7 +923,8 @@ with tab3:
         advice = holding_action_table(h)
         st.dataframe(advice, use_container_width=True, hide_index=True)
 
-        st.caption("“成本风险线”只是没有实时ATR时的6%回撤参考；若已运行行情评分，以“评分止损”和市场结构为优先。")
+        st.info("操作规则：成本回撤6%为风险退出线；盈利达到+8%计划先卖约1/3，达到+15%再卖约1/3，剩余仓位用MA5/趋势破位跟踪。A股按100股整数手执行；可卖股数受T+1限制。银行ETF 516310 保留在账户总市值核对中，但不参与本表分析。")
+        st.caption("以上止盈价按录入成本计算；实时评分止损和MA5趋势线更新后优先参考，不能把计划价当作保证成交价。")
         csv = h.to_csv(index=False).encode("utf-8-sig")
         st.download_button("下载完整持仓CSV", csv, "holdings_full.csv", "text/csv")
         advice_csv = advice.to_csv(index=False).encode("utf-8-sig")
@@ -952,7 +967,7 @@ with tab1:
                 scores, _ = score_universe(
                     market,
                     cfg,
-                    h,
+                    holdings_for_analysis(h),
                     str(MODEL_PATH) if MODEL_PATH.exists() else None,
                 )
                 scores = _apply_live_market_context(scores, meta)
