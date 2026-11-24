@@ -535,22 +535,51 @@ def add_watchlist_industry_context(market: pd.DataFrame, snapshot: pd.DataFrame,
         industry_member_count=("symbol", "count"),
     )
     out["industry"] = out.get("industry", pd.Series(index=out.index, dtype=object))
-    out["industry_ret_1"] = np.nan
-    out["industry_breadth_ma20"] = np.nan
-    out["industry_member_count"] = np.nan
-    latest_date = pd.to_datetime(out["date"]).max()
     for symbol in symbols:
         match = s[s["symbol"].astype(str).str.zfill(6) == str(symbol).zfill(6)]
         if match.empty:
             continue
         industry = str(match.iloc[0].get("industry") or "")
-        out.loc[(out["symbol"].astype(str).str.zfill(6) == str(symbol).zfill(6)) & (pd.to_datetime(out["date"]) == latest_date), "industry"] = industry
-        if industry in stats.index:
-            stat = stats.loc[industry]
-            mask = (out["symbol"].astype(str).str.zfill(6) == str(symbol).zfill(6)) & (pd.to_datetime(out["date"]) == latest_date)
-            out.loc[mask, "industry_ret_1"] = float(stat["industry_ret_1"])
-            out.loc[mask, "industry_breadth_ma20"] = float(stat["industry_breadth_ma20"])
-            out.loc[mask, "industry_member_count"] = int(stat["industry_member_count"])
+        # 将实时行情的官方行业分类回填到该股票全部历史行，避免把手工主题标签当行业分类。
+        out.loc[out["symbol"].astype(str).str.zfill(6) == str(symbol).zfill(6), "industry"] = industry
+    return out
+
+
+def score_live_industry_context(scores: pd.DataFrame, snapshot: pd.DataFrame) -> pd.DataFrame:
+    """以全A快照的真实行业横截面补充行业分；只用当日数据，不伪造5/10日行业收益。"""
+    out = scores.copy()
+    if snapshot is None or snapshot.empty or "industry" not in snapshot.columns:
+        out["industry_score"] = 10.0
+        return out
+    s = snapshot.copy()
+    s["industry"] = s["industry"].fillna("").astype(str)
+    s["pct_change"] = pd.to_numeric(s["pct_change"], errors="coerce")
+    valid = s[(s["industry"] != "") & s["pct_change"].notna()]
+    stats = valid.groupby("industry").agg(
+        day_return=("pct_change", "mean"),
+        advancers=("pct_change", lambda x: int((x > 0).sum())),
+        members=("pct_change", "size"),
+    )
+    breadth = stats["advancers"] / stats["members"].replace(0, np.nan)
+    stats["breadth"] = breadth
+    scores_by_symbol = {}
+    for _, row in out.iterrows():
+        code = str(row.get("symbol", "")).zfill(6)
+        match = s[s["symbol"].astype(str).str.zfill(6) == code]
+        if match.empty:
+            scores_by_symbol[code] = 10.0
+            continue
+        industry = str(match.iloc[0].get("industry") or "")
+        if industry not in stats.index:
+            scores_by_symbol[code] = 10.0
+            continue
+        stat = stats.loc[industry]
+        score = 0.0
+        score += 8.0 if stat["day_return"] > 0 else 3.0
+        score += 8.0 if stat["breadth"] >= 0.65 else 6.0 if stat["breadth"] >= 0.50 else 3.0
+        score += 4.0 if int(stat["members"]) >= 10 else 2.0
+        scores_by_symbol[code] = min(20.0, score)
+    out["industry_score"] = out["symbol"].astype(str).str.zfill(6).map(scores_by_symbol).fillna(10.0)
     return out
 
 WATCHLIST_MAINBOARD = [
