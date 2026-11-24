@@ -92,8 +92,8 @@ EXCLUDED_HOLDING_SYMBOLS = {"516310"}
 
 DEFAULT_HOLDINGS = [
     {"symbol":"601398","name":"工商银行","industry":"银行","shares":200,"available_shares":0,"cost_price":9.154,"current_price":9.190},
-    {"symbol":"600901","name":"江苏金租","industry":"金融","shares":2200,"available_shares":1300,"cost_price":7.741,"current_price":7.780},
-    {"symbol":"516310","name":"银行ETF易方达（不纳入分析）","industry":"ETF忽略","shares":100,"available_shares":100,"cost_price":-3.448,"current_price":1.523},
+    {"symbol":"600901","name":"江苏金租","industry":"非银金融","shares":2200,"available_shares":1300,"cost_price":7.741,"current_price":7.780},
+    {"symbol":"516310","name":"银行ETF易方达","industry":"ETF忽略","shares":100,"available_shares":100,"cost_price":-3.448,"current_price":1.523},
 ]
 
 
@@ -897,7 +897,7 @@ with tab3:
             "industry": st.column_config.TextColumn("行业"),
             "shares": st.column_config.NumberColumn("持股", min_value=0, step=100, format="%d"),
             "available_shares": st.column_config.NumberColumn("可卖", min_value=0, step=100, format="%d"),
-            "cost_price": st.column_config.NumberColumn("成本", min_value=0.0, step=0.01, format="%.3f"),
+            "cost_price": st.column_config.NumberColumn("成本", min_value=-100.0, step=0.01, format="%.3f"),
             "current_price": st.column_config.NumberColumn("现价", min_value=0.0, step=0.01, format="%.3f"),
         },
         key="holdings_editor_v21",
