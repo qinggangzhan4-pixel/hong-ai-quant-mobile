@@ -634,7 +634,7 @@ with tab4:
             scores, _ = score_universe(
                 market,
                 cfg,
-                h,
+                holdings_for_analysis(h),
                 str(MODEL_PATH) if MODEL_PATH.exists() else None,
             )
             scores = _apply_live_market_context(scores, meta)
