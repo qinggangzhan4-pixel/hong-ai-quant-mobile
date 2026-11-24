@@ -555,7 +555,7 @@ def candidate_card(row):
 # ---------------- header ----------------
 st.title("📈 洪老师 AI 量化 v2.4.6")
 st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
-st.caption("Build: 2026-11-24-watchlist-kline ｜ 新增8只主板科技观察池实时行情及80日K线量化")
+st.caption("Build: 2026-11-24-holdings-risk-levels ｜ 更新最新截图持仓、ETF排除分析、分批止盈止损价")
 if st.session_state.get("auto_scan_error"):
     st.warning(f"自动评分未完成：{st.session_state.auto_scan_error}")
 
@@ -575,7 +575,10 @@ if "live_snapshot" not in st.session_state:
     st.session_state.live_snapshot = None
 if "live_selected" not in st.session_state:
     st.session_state.live_selected = None
-if "holdings" not in st.session_state:
+if st.session_state.get("holdings_revision") != CURRENT_HOLDINGS_REV:
+    st.session_state.holdings = _holdings_from_url()
+    st.session_state.holdings_revision = CURRENT_HOLDINGS_REV
+elif "holdings" not in st.session_state:
     st.session_state.holdings = _holdings_from_url()
 if "auto_scan_once_done" not in st.session_state:
     st.session_state.auto_scan_once_done = False
