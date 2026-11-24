@@ -9,7 +9,7 @@ import streamlit as st
 from ai_quant.config import load_config
 from ai_quant.engine import score_universe
 from ai_quant.risk import portfolio_risk
-from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan, fetch_watchlist_fundamentals_and_flow, add_watchlist_industry_context
+from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan, fetch_watchlist_fundamentals_and_flow, add_watchlist_industry_context, score_live_industry_context
 
 ROOT = Path(__file__).resolve().parent
 CFG_PATH = ROOT / "config.yaml"
@@ -762,6 +762,13 @@ with tab5:
                 clean_holdings(st.session_state.holdings),
                 None,
             )
+            previous_industry = pd.to_numeric(watch_scores["industry_score"], errors="coerce").fillna(10)
+            watch_scores = score_live_industry_context(watch_scores, watch_snapshot)
+            new_industry = pd.to_numeric(watch_scores["industry_score"], errors="coerce").fillna(10)
+            watch_scores["rule_score"] = (
+                pd.to_numeric(watch_scores["rule_score"], errors="coerce").fillna(0)
+                - previous_industry + new_industry
+            ).round(2)
 
             # 观察池只有8只，不能用8只样本计算全市场广度；
             # 用全A快照的涨跌家数与平均涨跌替换市场环境分。
@@ -808,6 +815,9 @@ with tab5:
             st.warning("历史不足80个交易日，未参与评分：" + "、".join(watch_meta["short_history"]))
         if watch_meta.get("missing_live"):
             st.warning("实时快照未找到：" + "、".join(watch_meta["missing_live"]))
+        if watch_meta.get("quality_flow_failures"):
+            st.warning("部分财务/资金流接口未返回：" + "；".join(watch_meta["quality_flow_failures"]))
+        st.caption("财务指标取最新公开报告期；主力净流入取最新可用日频资金流，单位元；行业评分依据全A同行业当日涨跌和上涨家数。不同数据源若未返回，字段留空，不用估算值代替。")
 
     if watch_state is not None and len(watch_state):
         rows = []
@@ -828,6 +838,12 @@ with tab5:
                 "RSI14": round(float(rr.get("rsi14",np.nan)),1) if pd.notna(rr.get("rsi14")) else None,
                 "ATR14%": round(float(rr.get("atr14_pct",np.nan))*100,2) if pd.notna(rr.get("atr14_pct")) else None,
                 "量比": round(float(rr.get("vol_ratio5",np.nan)),2) if pd.notna(rr.get("vol_ratio5")) else None,
+                "ROE%": round(float(rr.get("roe",np.nan)),2) if pd.notna(rr.get("roe")) else None,
+                "归母净利同比%": round(float(rr.get("net_profit_yoy",np.nan)),2) if pd.notna(rr.get("net_profit_yoy")) else None,
+                "主力净流入(亿)": round(float(rr.get("main_net_inflow",np.nan))/1e8,2) if pd.notna(rr.get("main_net_inflow")) else None,
+                "行业评分": round(float(rr.get("industry_score",np.nan)),1) if pd.notna(rr.get("industry_score")) else None,
+                "财报日期": str(rr.get("financial_report_date","") or ""),
+                "资金日期": str(rr.get("flow_date","") or ""),
                 "状态": lv["status"],
             })
         st.markdown("### 八只股票正式量化结果")
