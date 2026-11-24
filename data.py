@@ -434,6 +434,85 @@ def fetch_live_a_scan(preselect_n: int = 20, history_calendar_days: int = 150, m
     return market, snapshot, selected, meta
 
 
+
+WATCHLIST_MAINBOARD = [
+    {"symbol":"601138","name":"工业富联","industry":"AI服务器"},
+    {"symbol":"002384","name":"东山精密","industry":"PCB/电子制造"},
+    {"symbol":"002281","name":"光迅科技","industry":"光通信"},
+    {"symbol":"002463","name":"沪电股份","industry":"AI服务器PCB"},
+    {"symbol":"002916","name":"深南电路","industry":"PCB/封装基板"},
+    {"symbol":"600183","name":"生益科技","industry":"覆铜板材料"},
+    {"symbol":"600667","name":"太极实业","industry":"半导体封测"},
+    {"symbol":"000977","name":"浪潮信息","industry":"AI服务器"},
+]
+
+
+def fetch_watchlist_scan(history_calendar_days: int = 260, max_workers: int = 4):
+    """为固定主板观察池逐只拉取实时行情和至少80个交易日的日K。"""
+    t0 = time.time()
+    snapshot = fetch_realtime_a_snapshot()
+    wanted = {x["symbol"] for x in WATCHLIST_MAINBOARD}
+    live = snapshot[snapshot["symbol"].astype(str).str.zfill(6).isin(wanted)].copy()
+    live = live[live["is_mainboard"].fillna(False).map(bool)].copy()
+    live = live[live["is_st"].fillna(False).map(bool).eq(False)].copy()
+
+    live_map = {str(r["symbol"]).zfill(6): r.to_dict() for _, r in live.iterrows()}
+    missing_live = sorted(wanted - set(live_map))
+    now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
+    end = now_cn.strftime("%Y%m%d")
+    start = (now_cn - timedelta(days=int(history_calendar_days))).strftime("%Y%m%d")
+
+    rows, failures, short_history = [], [], []
+    workers = max(1, min(int(max_workers), 6))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {}
+        for item in WATCHLIST_MAINBOARD:
+            symbol = item["symbol"]
+            live_row = live_map.get(symbol)
+            if live_row is None:
+                failures.append(symbol)
+                continue
+            futures[pool.submit(
+                _fetch_one_history, symbol, item["name"], live_row, start, end
+            )] = symbol
+
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                frame = future.result()
+                if frame is None or frame.empty:
+                    failures.append(symbol)
+                    continue
+                history_count = int(frame.loc[frame["date"] < pd.Timestamp(now_cn.date())].shape[0])
+                if history_count < 80:
+                    short_history.append(f"{symbol}({history_count}日)")
+                    continue
+                frame["industry"] = next(
+                    x["industry"] for x in WATCHLIST_MAINBOARD if x["symbol"] == symbol
+                )
+                rows.append(frame)
+            except Exception as exc:
+                failures.append(f"{symbol}:{str(exc)[:120]}")
+
+    if not rows:
+        raise RuntimeError(
+            "观察池历史K线全部获取失败；请检查东方财富接口、部署依赖或网络。"
+        )
+
+    market = pd.concat(rows, ignore_index=True)
+    meta = live_market_context(snapshot)
+    meta.update({
+        "scan_time": now_cn.strftime("%Y-%m-%d %H:%M:%S"),
+        "watchlist_size": len(WATCHLIST_MAINBOARD),
+        "loaded_symbols": int(market["symbol"].nunique()),
+        "missing_live": missing_live,
+        "failed_symbols": failures,
+        "short_history": short_history,
+        "history_calendar_days": int(history_calendar_days),
+        "elapsed_seconds": round(time.time() - t0, 1),
+    })
+    return market, snapshot, meta
+
 def fetch_akshare_history(symbols: list[str], start: str, end: str, output_path: str) -> pd.DataFrame:
     """保留原 CLI 功能。"""
     try:
