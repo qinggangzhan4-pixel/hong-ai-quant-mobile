@@ -84,9 +84,9 @@ def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame
         "market_score", "industry_score", "quality_score", "trend_score", "execution_score",
         "rule_score", "ml_probability", "combined_score", "relay_score", "relay_status", "signal",
         "entry_price", "stop_price", "stop_pct", "suggested_shares", "suggested_value", "action",
-        "ma5", "ma10", "ma20", "prior_high20", "breakout20", "gap", "atr14_pct",
+        "ma5", "ma10", "ma20", "prior_high20", "breakout20", "gap",
         "market_breadth_ma20", "industry_ret_1", "industry_ret_5", "industry_ret_10", "industry_breadth_ma20",
-        "vol_ratio5", "turnover_rate", "rsi14", "atr14", "atr14_pct", "prior_high20",
+        "vol_ratio5", "turnover_rate", "rsi14", "atr14", "atr14_pct",
         "roe", "net_profit_yoy", "main_net_inflow", "financial_report_date", "flow_date",
         "pe_ttm", "pb", "market_cap", "amount", "industry_member_count"
     ]
