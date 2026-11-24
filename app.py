@@ -786,6 +786,9 @@ with tab5:
             watch_meta["quality_flow_success"] = int(
                 quality_flow[["roe", "net_profit_yoy", "main_net_inflow"]].notna().any(axis=1).sum()
             )
+            watch_meta["quality_flow_complete"] = int(
+                quality_flow[["roe", "net_profit_yoy", "main_net_inflow"]].notna().all(axis=1).sum()
+            )
             st.session_state.watchlist_market = watch_market
             st.session_state.watchlist_snapshot = watch_snapshot
             st.session_state.watchlist_meta = watch_meta
@@ -809,6 +812,7 @@ with tab5:
         c2.metric("全市场上涨占比", f"{watch_meta.get('up_ratio',0)*100:.1f}%")
         c3.metric("耗时", f"{watch_meta.get('elapsed_seconds',0):.1f}s")
         st.caption(f"数据时间：{watch_meta.get('scan_time','')} ｜ 历史窗口：{watch_meta.get('history_calendar_days',0)}个自然日")
+        st.caption(f"财务/资金流：{watch_meta.get('quality_flow_success',0)}/8只至少有一项返回；完整三项：{watch_meta.get('quality_flow_complete',0)}/8只")
         if watch_meta.get("failed_symbols"):
             st.warning("行情或历史数据失败：" + "、".join(watch_meta["failed_symbols"]))
         if watch_meta.get("short_history"):
