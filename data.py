@@ -99,7 +99,7 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
     """
     fields = [
         "f12","f14","f2","f3","f4","f5","f6","f7","f15","f16","f17","f18",
-        "f10","f8","f9","f23","f20","f21","f22","f11"
+        "f10","f8","f9","f23","f20","f21","f22","f11","f100"
     ]
     base_params = {
         "pz": 200,
@@ -196,6 +196,7 @@ def fetch_realtime_a_snapshot() -> pd.DataFrame:
             "float_market_cap": item.get("f21"),
             "speed": item.get("f22"),
             "change_5m": item.get("f11"),
+            "industry": item.get("f100"),
         })
 
     out = pd.DataFrame(rows)
@@ -434,6 +435,123 @@ def fetch_live_a_scan(preselect_n: int = 20, history_calendar_days: int = 150, m
     return market, snapshot, selected, meta
 
 
+
+
+def _eastmoney_secucode(symbol: str) -> str:
+    s = str(symbol).zfill(6)
+    return f"{s}.SH" if s.startswith(("5", "6", "9")) else f"{s}.SZ"
+
+
+def fetch_financial_quality(symbol: str) -> dict:
+    """最新公开财报：加权ROE、归母净利润同比；缺失时保留NaN。"""
+    params = {
+        "reportName": "RPT_F10_FINANCE_MAINFINADATA",
+        "columns": "ALL",
+        "filter": f'(SECUCODE="{_eastmoney_secucode(symbol)}")',
+        "pageNumber": 1,
+        "pageSize": 8,
+        "sortTypes": -1,
+        "sortColumns": "REPORT_DATE",
+    }
+    j = _get_json("https://datacenter.eastmoney.com/securities/api/data/v1/get", params, timeout=12)
+    rows = ((j.get("result") or {}).get("data") or [])
+    if not rows:
+        return {"roe": np.nan, "net_profit_yoy": np.nan, "financial_report_date": None}
+    row = rows[0]
+    return {
+        "roe": pd.to_numeric(pd.Series([row.get("ROEJQ")]), errors="coerce").iloc[0],
+        "net_profit_yoy": pd.to_numeric(pd.Series([row.get("PARENTNETPROFITTZ")]), errors="coerce").iloc[0],
+        "financial_report_date": row.get("REPORT_DATE") or row.get("REPORT_DATE_NAME"),
+    }
+
+
+def fetch_stock_main_flow(symbol: str) -> dict:
+    """获取最新日频主力净流入；接口失败或无记录时明确返回NaN。"""
+    params = {
+        "secid": _eastmoney_secid(symbol),
+        "klt": 101,
+        "lmt": 5,
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56",
+    }
+    j = _get_json("https://push2.eastmoney.com/api/qt/stock/fflow/kline/get", params, timeout=10)
+    rows = ((j.get("data") or {}).get("klines") or [])
+    if not rows:
+        return {"main_net_inflow": np.nan, "flow_date": None}
+    parts = str(rows[-1]).split(",")
+    if len(parts) < 2:
+        return {"main_net_inflow": np.nan, "flow_date": None}
+    try:
+        value = float(parts[1])
+    except (TypeError, ValueError):
+        value = np.nan
+    return {"main_net_inflow": value, "flow_date": parts[0]}
+
+
+def fetch_watchlist_fundamentals_and_flow(symbols: list[str], max_workers: int = 4) -> pd.DataFrame:
+    """并发补齐观察池财务质量和主力资金流；失败字段保持缺失并记录。"""
+    rows = []
+    workers = max(1, min(int(max_workers), 8))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        jobs = {}
+        for symbol in symbols:
+            jobs[pool.submit(fetch_financial_quality, symbol)] = (symbol, "fundamental")
+            jobs[pool.submit(fetch_stock_main_flow, symbol)] = (symbol, "flow")
+        results = {}
+        failures = []
+        for future in as_completed(jobs):
+            symbol, kind = jobs[future]
+            try:
+                results.setdefault(symbol, {}).update(future.result())
+            except Exception as exc:
+                failures.append(f"{symbol}-{kind}:{str(exc)[:100]}")
+                if kind == "fundamental":
+                    results.setdefault(symbol, {}).update({
+                        "roe": np.nan, "net_profit_yoy": np.nan, "financial_report_date": None
+                    })
+                else:
+                    results.setdefault(symbol, {}).update({
+                        "main_net_inflow": np.nan, "flow_date": None
+                    })
+    for symbol, values in results.items():
+        rows.append({"symbol": str(symbol).zfill(6), **values})
+    out = pd.DataFrame(rows)
+    out.attrs["failures"] = failures
+    return out
+
+
+def add_watchlist_industry_context(market: pd.DataFrame, snapshot: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
+    """用全A实时快照按东财行业分类计算行业当日涨跌和上涨宽度。"""
+    out = market.copy()
+    if snapshot is None or snapshot.empty or "industry" not in snapshot.columns:
+        return out
+    s = snapshot.copy()
+    s["industry"] = s["industry"].fillna("").astype(str)
+    s["pct_change"] = pd.to_numeric(s["pct_change"], errors="coerce")
+    valid = s[(s["industry"] != "") & s["pct_change"].notna()]
+    stats = valid.groupby("industry").agg(
+        industry_ret_1=("pct_change", lambda x: float(x.mean() / 100.0)),
+        industry_breadth_ma20=("pct_change", lambda x: float((x > 0).mean())),
+        industry_member_count=("symbol", "count"),
+    )
+    out["industry"] = out.get("industry", pd.Series(index=out.index, dtype=object))
+    out["industry_ret_1"] = np.nan
+    out["industry_breadth_ma20"] = np.nan
+    out["industry_member_count"] = np.nan
+    latest_date = pd.to_datetime(out["date"]).max()
+    for symbol in symbols:
+        match = s[s["symbol"].astype(str).str.zfill(6) == str(symbol).zfill(6)]
+        if match.empty:
+            continue
+        industry = str(match.iloc[0].get("industry") or "")
+        out.loc[(out["symbol"].astype(str).str.zfill(6) == str(symbol).zfill(6)) & (pd.to_datetime(out["date"]) == latest_date), "industry"] = industry
+        if industry in stats.index:
+            stat = stats.loc[industry]
+            mask = (out["symbol"].astype(str).str.zfill(6) == str(symbol).zfill(6)) & (pd.to_datetime(out["date"]) == latest_date)
+            out.loc[mask, "industry_ret_1"] = float(stat["industry_ret_1"])
+            out.loc[mask, "industry_breadth_ma20"] = float(stat["industry_breadth_ma20"])
+            out.loc[mask, "industry_member_count"] = int(stat["industry_member_count"])
+    return out
 
 WATCHLIST_MAINBOARD = [
     {"symbol":"601138","name":"工业富联","industry":"AI服务器"},
