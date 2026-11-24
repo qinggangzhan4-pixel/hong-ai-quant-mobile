@@ -85,7 +85,10 @@ def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame
         "rule_score", "ml_probability", "combined_score", "relay_score", "relay_status", "signal",
         "entry_price", "stop_price", "stop_pct", "suggested_shares", "suggested_value", "action",
         "ma5", "ma10", "ma20", "prior_high20", "breakout20", "gap", "atr14_pct",
-        "market_breadth_ma20", "industry_ret_5", "industry_ret_10", "vol_ratio5", "turnover_rate", "rsi14"
+        "market_breadth_ma20", "industry_ret_1", "industry_ret_5", "industry_ret_10", "industry_breadth_ma20",
+        "vol_ratio5", "turnover_rate", "rsi14", "atr14", "atr14_pct", "prior_high20",
+        "roe", "net_profit_yoy", "main_net_inflow", "financial_report_date", "flow_date",
+        "pe_ttm", "pb", "market_cap", "amount", "industry_member_count"
     ]
     existing = [c for c in cols if c in latest.columns]
     latest = latest.sort_values(["combined_score", "relay_score"], ascending=False)
