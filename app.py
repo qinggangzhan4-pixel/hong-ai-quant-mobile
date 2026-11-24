@@ -9,7 +9,7 @@ import streamlit as st
 from ai_quant.config import load_config
 from ai_quant.engine import score_universe
 from ai_quant.risk import portfolio_risk
-from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot
+from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan
 
 ROOT = Path(__file__).resolve().parent
 CFG_PATH = ROOT / "config.yaml"
@@ -18,7 +18,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.4.5",
+    page_title="洪老师AI量化 v2.4.6",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -539,9 +539,9 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.4.5")
+st.title("📈 洪老师 AI 量化 v2.4.6")
 st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
-st.caption("Build: 2026-11-23-ssl-host-fix ｜ 修复东财行情错误节点域名与SSL证书主机名不匹配")
+st.caption("Build: 2026-11-24-watchlist-kline ｜ 新增8只主板科技观察池实时行情及80日K线量化")
 if st.session_state.get("auto_scan_error"):
     st.warning(f"自动评分未完成：{st.session_state.auto_scan_error}")
 
@@ -585,7 +585,7 @@ def _live_snapshot_table(snapshot, limit=100):
 
 
 # ---------------- tabs ----------------
-tab1, tab2, tab3, tab4 = st.tabs(["🏆 今日候选", "🔎 查一只", "💼 我的持仓", "📤 数据"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏆 今日候选", "🔎 查一只", "💼 我的持仓", "📤 数据", "🎯 科技观察池"])
 
 with tab4:
     st.subheader("实时量化数据")
@@ -721,6 +721,106 @@ with tab4:
                     st.success(f"完成：{len(scores)} 只股票已评分。")
                 except Exception as e:
                     st.error(f"评分失败：{e}")
+
+
+with tab5:
+    st.subheader("主板科技观察池")
+    st.caption("固定8只沪深主板股票；逐只抓取实时快照和至少80个交易日的日K，再用现有量化引擎评分。")
+    st.caption("评分口径说明：观察池只有8只，市场广度和行业广度采用中性分，不冒充全市场广度；缺失的ROE、净利润增速、主力净流入不会编造。")
+
+    watch_state = st.session_state.get("watchlist_scores")
+    watch_meta = st.session_state.get("watchlist_meta")
+
+    if st.button("📥 接入8只股票行情并运行量化", type="primary", use_container_width=True):
+        status = st.status("正在接入观察池数据……", expanded=True)
+        try:
+            status.write("① 获取全A实时快照，并筛出8只主板观察股")
+            watch_market, watch_snapshot, watch_meta = fetch_watchlist_scan(
+                history_calendar_days=260,
+                max_workers=4,
+            )
+            status.write(f"② 已取得 {watch_market['symbol'].nunique()} 只股票的历史K线，校验至少80个交易日")
+            watch_cfg = json.loads(json.dumps(cfg))
+            watch_cfg["universe"]["max_price"] = 1000.0
+            watch_scores, _ = score_universe(
+                watch_market,
+                watch_cfg,
+                clean_holdings(st.session_state.holdings),
+                None,
+            )
+
+            # 观察池只有8只，不能把8只股票的涨跌比例误当成全市场宽度；
+            # 缺少行业/基本面/主力流数据时使用中性分，并明确在页面说明。
+            watch_scores["market_score"] = 10.0
+            watch_scores["industry_score"] = 10.0
+            watch_scores["rule_score"] = (
+                watch_scores["market_score"]
+                + watch_scores["industry_score"]
+                + watch_scores["quality_score"]
+                + watch_scores["trend_score"]
+                + watch_scores["execution_score"]
+            ).round(2)
+            watch_scores["combined_score"] = watch_scores["rule_score"]
+            watch_scores = watch_scores.sort_values("combined_score", ascending=False).reset_index(drop=True)
+
+            st.session_state.watchlist_market = watch_market
+            st.session_state.watchlist_snapshot = watch_snapshot
+            st.session_state.watchlist_meta = watch_meta
+            st.session_state.watchlist_scores = watch_scores
+
+            status.update(
+                label=f"完成：成功接入 {watch_meta['loaded_symbols']}/8 只观察股",
+                state="complete",
+                expanded=False,
+            )
+            st.success("观察池行情和历史K线已接入，量化结果已生成。")
+        except Exception as exc:
+            status.update(label="观察池接入失败", state="error", expanded=True)
+            st.error(f"接入失败：{exc}")
+
+    watch_state = st.session_state.get("watchlist_scores")
+    watch_meta = st.session_state.get("watchlist_meta")
+    if watch_meta:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("成功接入", f"{watch_meta.get('loaded_symbols',0)}/8")
+        c2.metric("全市场上涨占比", f"{watch_meta.get('up_ratio',0)*100:.1f}%")
+        c3.metric("耗时", f"{watch_meta.get('elapsed_seconds',0):.1f}s")
+        st.caption(f"数据时间：{watch_meta.get('scan_time','')} ｜ 历史窗口：{watch_meta.get('history_calendar_days',0)}个自然日")
+        if watch_meta.get("failed_symbols"):
+            st.warning("行情或历史数据失败：" + "、".join(watch_meta["failed_symbols"]))
+        if watch_meta.get("short_history"):
+            st.warning("历史不足80个交易日，未参与评分：" + "、".join(watch_meta["short_history"]))
+        if watch_meta.get("missing_live"):
+            st.warning("实时快照未找到：" + "、".join(watch_meta["missing_live"]))
+
+    if watch_state is not None and len(watch_state):
+        rows = []
+        for _, rr in watch_state.iterrows():
+            lv = trade_levels(rr)
+            rows.append({
+                "代码": str(rr.get("symbol","")).zfill(6),
+                "名称": rr.get("name",""),
+                "评分": round(float(rr.get("combined_score",0)),1),
+                "现价": round(float(rr.get("close",0)),2),
+                "MA5": round(float(rr.get("ma5",np.nan)),2) if pd.notna(rr.get("ma5")) else None,
+                "MA10": round(float(rr.get("ma10",np.nan)),2) if pd.notna(rr.get("ma10")) else None,
+                "回踩区间": f"{lv['buy_low']:.2f}–{lv['buy_high']:.2f}" if pd.notna(lv["buy_low"]) and pd.notna(lv["buy_high"]) else "数据不足",
+                "突破确认": round(float(lv["breakout"]),2) if pd.notna(lv["breakout"]) else None,
+                "止损": round(float(lv["stop"]),2) if pd.notna(lv["stop"]) else None,
+                "止盈1": round(float(lv["tp1"]),2) if pd.notna(lv["tp1"]) else None,
+                "止盈2": round(float(lv["tp2"]),2) if pd.notna(lv["tp2"]) else None,
+                "RSI14": round(float(rr.get("rsi14",np.nan)),1) if pd.notna(rr.get("rsi14")) else None,
+                "ATR14%": round(float(rr.get("atr14_pct",np.nan))*100,2) if pd.notna(rr.get("atr14_pct")) else None,
+                "量比": round(float(rr.get("vol_ratio5",np.nan)),2) if pd.notna(rr.get("vol_ratio5")) else None,
+                "状态": lv["status"],
+            })
+        st.markdown("### 八只股票正式量化结果")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("突破信号要求站上前20日高点上方约0.2%，且量比至少1.2；回踩参考MA5/MA10。止盈按计划入场参考价计算，未触发前不是实际订单。")
+        csv = watch_state.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("下载观察池评分CSV", csv, "mainboard_tech_watchlist_scores.csv", "text/csv")
+    else:
+        st.info("点击上方按钮，系统才会抓取这8只股票的行情和历史K线。")
 
 with tab3:
     st.subheader("我的持仓")
