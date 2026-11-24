@@ -85,7 +85,7 @@ def load_demo():
 HOLDING_INPUT_COLUMNS = ["symbol","name","industry","shares","available_shares","cost_price","current_price"]
 HOLDING_COLUMNS = HOLDING_INPUT_COLUMNS + ["market_value","pnl","pnl_pct"]
 
-CURRENT_HOLDINGS_REV = "20261124_1350"
+CURRENT_HOLDINGS_REV = "20261124_1352"
 
 # 516310 保留在账户总市值/现金核对中，但按用户要求不参与持仓评分、行业集中度和止盈止损。
 EXCLUDED_HOLDING_SYMBOLS = {"516310"}
