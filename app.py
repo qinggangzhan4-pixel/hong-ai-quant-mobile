@@ -9,7 +9,7 @@ import streamlit as st
 from ai_quant.config import load_config
 from ai_quant.engine import score_universe
 from ai_quant.risk import portfolio_risk
-from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan
+from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan, fetch_watchlist_fundamentals_and_flow, add_watchlist_industry_context
 
 ROOT = Path(__file__).resolve().parent
 CFG_PATH = ROOT / "config.yaml"
@@ -742,6 +742,20 @@ with tab5:
             status.write(f"② 已取得 {watch_market['symbol'].nunique()} 只股票的历史K线，校验至少80个交易日")
             watch_cfg = json.loads(json.dumps(cfg))
             watch_cfg["universe"]["max_price"] = 1000.0
+            status.write("③ 补齐最新财报ROE、归母净利润同比和个股主力资金流")
+            quality_flow = fetch_watchlist_fundamentals_and_flow(
+                watch_market["symbol"].astype(str).str.zfill(6).unique().tolist(),
+                max_workers=4,
+            )
+            watch_market = watch_market.merge(quality_flow, on="symbol", how="left")
+            watch_market = add_watchlist_industry_context(
+                watch_market, watch_snapshot,
+                watch_market["symbol"].astype(str).str.zfill(6).unique().tolist(),
+            )
+
+            status.write("④ 使用全A市场环境、真实行业横截面及个股基本面运行评分")
+            watch_cfg = json.loads(json.dumps(cfg))
+            watch_cfg["universe"]["max_price"] = 1000.0
             watch_scores, _ = score_universe(
                 watch_market,
                 watch_cfg,
@@ -749,20 +763,22 @@ with tab5:
                 None,
             )
 
-            # 观察池只有8只，不能把8只股票的涨跌比例误当成全市场宽度；
-            # 缺少行业/基本面/主力流数据时使用中性分，并明确在页面说明。
-            watch_scores["market_score"] = 10.0
-            watch_scores["industry_score"] = 10.0
+            # 观察池只有8只，不能用8只样本计算全市场广度；
+            # 用全A快照的涨跌家数与平均涨跌替换市场环境分。
+            live_market_score = _live_market_score(watch_meta)
+            old_market = pd.to_numeric(watch_scores["market_score"], errors="coerce").fillna(0)
+            watch_scores["market_score"] = live_market_score
             watch_scores["rule_score"] = (
-                watch_scores["market_score"]
-                + watch_scores["industry_score"]
-                + watch_scores["quality_score"]
-                + watch_scores["trend_score"]
-                + watch_scores["execution_score"]
+                pd.to_numeric(watch_scores["rule_score"], errors="coerce").fillna(0)
+                - old_market + live_market_score
             ).round(2)
             watch_scores["combined_score"] = watch_scores["rule_score"]
-            watch_scores = watch_scores.sort_values("combined_score", ascending=False).reset_index(drop=True)
 
+            quality_failures = quality_flow.attrs.get("failures", [])
+            watch_meta["quality_flow_failures"] = quality_failures
+            watch_meta["quality_flow_success"] = int(
+                quality_flow[["roe", "net_profit_yoy", "main_net_inflow"]].notna().any(axis=1).sum()
+            )
             st.session_state.watchlist_market = watch_market
             st.session_state.watchlist_snapshot = watch_snapshot
             st.session_state.watchlist_meta = watch_meta
