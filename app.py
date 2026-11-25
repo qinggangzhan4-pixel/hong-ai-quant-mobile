@@ -1,4 +1,6 @@
 from pathlib import Path
+import sys
+import types
 import json
 import base64
 import math
@@ -6,10 +8,21 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+ROOT = Path(__file__).resolve().parent
+if "ai_quant" not in sys.modules:
+    _pkg = types.ModuleType("ai_quant")
+    _pkg.__path__ = [str(ROOT)]
+    _pkg.__package__ = "ai_quant"
+    sys.modules["ai_quant"] = _pkg
+
 from ai_quant.config import load_config
 from ai_quant.engine import score_universe
 from ai_quant.risk import portfolio_risk
 from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan, fetch_watchlist_fundamentals_and_flow, add_watchlist_industry_context, score_live_industry_context
+from ai_quant.global_context import (
+    CONSUMER_CATEGORIES, classify_market_sector, fetch_global_market_snapshot,
+    fetch_global_news, score_global_market,
+)
 
 ROOT = Path(__file__).resolve().parent
 CFG_PATH = ROOT / "config.yaml"
@@ -18,7 +31,7 @@ DEMO_PATH = ROOT / "examples" / "demo_market.csv"
 HOLDINGS_TEMPLATE = ROOT / "examples" / "holdings_template.csv"
 
 st.set_page_config(
-    page_title="洪老师AI量化 v2.4.6",
+    page_title="洪老师AI量化 v2.5.0",
     page_icon="📈",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -345,6 +358,55 @@ def _apply_live_market_context(scores, meta):
     return x.sort_values(["combined_score", "relay_score"], ascending=False).reset_index(drop=True)
 
 
+def _apply_global_market_context(scores, snapshot=None):
+    """把全球隔夜情绪纳入市场环境20分；本地A股环境与全球环境各占一半。"""
+    if scores is None or len(scores) == 0:
+        return scores
+    x = scores.copy()
+    x["sector_category"] = x.apply(
+        lambda r: classify_market_sector(r.get("name"), r.get("industry")), axis=1
+    )
+    x["global_market_score"] = np.nan
+    if snapshot is not None and len(snapshot):
+        global_score, breakdown = score_global_market(
+            snapshot, st.session_state.get("global_news_adjustment", 0.0)
+        )
+        old_market = pd.to_numeric(x["market_score"], errors="coerce").fillna(10.0)
+        blended_market = old_market * 0.5 + float(global_score) * 0.5
+        x["market_score"] = blended_market.round(2)
+        x["rule_score"] = (
+            pd.to_numeric(x["rule_score"], errors="coerce").fillna(0)
+            - old_market + blended_market
+        ).round(2)
+        x["global_market_score"] = float(global_score)
+        st.session_state.global_market_breakdown = breakdown
+
+    ml = pd.to_numeric(x.get("ml_probability", np.nan), errors="coerce")
+    rw = float(cfg["strategy"]["rule_weight"])
+    mw = float(cfg["strategy"]["model_weight"])
+    x["combined_score"] = pd.to_numeric(x["rule_score"], errors="coerce").fillna(0)
+    if isinstance(ml, pd.Series):
+        use_ml = ml.notna()
+        x.loc[use_ml, "combined_score"] = (
+            rw * x.loc[use_ml, "rule_score"] + mw * (ml[use_ml] * 100)
+        )
+
+    buy_th = float(cfg["strategy"]["score_buy_threshold"])
+    watch_th = float(cfg["strategy"]["score_watch_threshold"])
+    x["signal"] = np.where(
+        x["combined_score"] >= buy_th,
+        "BUY_CANDIDATE",
+        np.where(x["combined_score"] >= watch_th, "WATCH", "AVOID"),
+    )
+    if "relay_status" in x.columns and "relay_score" in x.columns:
+        applicable = x["relay_status"].astype(str) != "not_applicable"
+        x.loc[applicable & (x["relay_score"] < 50), "signal"] = "AVOID_RELAY"
+        x.loc[applicable & (x["relay_score"] >= 70), "signal"] = "RELAY_CANDIDATE"
+    return x.sort_values(
+        ["combined_score", "relay_score"], ascending=False
+    ).reset_index(drop=True)
+
+
 def _refresh_holdings_prices(snapshot):
     h = clean_holdings(st.session_state.holdings)
     if h.empty or snapshot is None or len(snapshot) == 0:
@@ -553,9 +615,9 @@ def candidate_card(row):
 
 
 # ---------------- header ----------------
-st.title("📈 洪老师 AI 量化 v2.4.6")
-st.caption("手机网页版 · 实时A股→评分→回踩/突破买点→止损/止盈→持仓操作。AI不达标自动关闭。")
-st.caption("Build: 2026-11-24-holdings-risk-levels ｜ 更新最新截图持仓、ETF排除分析、分批止盈止损价")
+st.title("📈 洪老师 AI 量化 v2.5.0")
+st.caption("手机网页版 · A股主板全行业轮动 + 美股/韩国/日本隔夜联动 + 消费专属质量因子 + 买卖点/持仓风控。")
+st.caption("Build: 2026-11-25-global-consumer-v2.5.0 ｜ 新增全球市场情绪、隔夜新闻线索、消费行业分类与财务因子")
 if st.session_state.get("auto_scan_error"):
     st.warning(f"自动评分未完成：{st.session_state.auto_scan_error}")
 
@@ -575,6 +637,20 @@ if "live_snapshot" not in st.session_state:
     st.session_state.live_snapshot = None
 if "live_selected" not in st.session_state:
     st.session_state.live_selected = None
+if "global_market_snapshot" not in st.session_state:
+    st.session_state.global_market_snapshot = pd.DataFrame()
+if "global_news" not in st.session_state:
+    st.session_state.global_news = pd.DataFrame()
+if "global_news_adjustment" not in st.session_state:
+    st.session_state.global_news_adjustment = 0.0
+if "global_market_breakdown" not in st.session_state:
+    st.session_state.global_market_breakdown = {}
+if "global_market_error" not in st.session_state:
+    st.session_state.global_market_error = ""
+if "global_news_error" not in st.session_state:
+    st.session_state.global_news_error = ""
+if "scores_pre_global" not in st.session_state:
+    st.session_state.scores_pre_global = None
 if st.session_state.get("holdings_revision") != CURRENT_HOLDINGS_REV:
     st.session_state.holdings = _holdings_from_url()
     st.session_state.holdings_revision = CURRENT_HOLDINGS_REV
@@ -602,7 +678,7 @@ def _live_snapshot_table(snapshot, limit=100):
 
 
 # ---------------- tabs ----------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏆 今日候选", "🔎 查一只", "💼 我的持仓", "📤 数据", "🎯 科技观察池"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🏆 今日候选", "🔎 查一只", "💼 我的持仓", "📤 数据", "🎯 科技观察池", "🌐 全球/消费"])
 
 with tab4:
     st.subheader("实时量化数据")
@@ -734,6 +810,10 @@ with tab4:
                         h,
                         str(MODEL_PATH) if MODEL_PATH.exists() else None,
                     )
+                    st.session_state.scores_pre_global = scores.copy()
+                    scores = _apply_global_market_context(
+                        scores, st.session_state.global_market_snapshot
+                    )
                     st.session_state.scores = scores
                     st.success(f"完成：{len(scores)} 只股票已评分。")
                 except Exception as e:
@@ -797,6 +877,9 @@ with tab5:
                 - old_market + live_market_score
             ).round(2)
             watch_scores["combined_score"] = watch_scores["rule_score"]
+            watch_scores = _apply_global_market_context(
+                watch_scores, st.session_state.global_market_snapshot
+            )
 
             quality_failures = quality_flow.attrs.get("failures", [])
             watch_meta["quality_flow_failures"] = quality_failures
@@ -867,13 +950,124 @@ with tab5:
                 "资金日期": str(rr.get("flow_date","") or ""),
                 "状态": lv["status"],
             })
-        st.markdown("### 八只股票正式量化结果")
+        st.markdown("### 八只股票正式量化结果（已叠加全球市场因子）")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.caption("突破信号要求站上前20日高点上方约0.2%，且量比至少1.2；回踩参考MA5/MA10。止盈按计划入场参考价计算，未触发前不是实际订单。")
         csv = watch_state.to_csv(index=False).encode("utf-8-sig")
         st.download_button("下载观察池评分CSV", csv, "mainboard_tech_watchlist_scores.csv", "text/csv")
     else:
         st.info("点击上方按钮，系统才会抓取这8只股票的行情和历史K线。")
+
+with tab6:
+    st.subheader("全球市场联动与消费行业")
+    st.caption("海外行情通过公开行情接口获取；各市场交易时间不同。全球因子只占市场环境分的一半，数据缺失时不伪造涨跌。")
+
+    if st.button("🌐 刷新美股、韩国、日本行情及隔夜新闻", type="primary", use_container_width=True):
+        with st.status("正在更新全球市场数据……", expanded=True) as global_status:
+            try:
+                global_status.write("① 获取美股指数、费半、英伟达、美光、AMD、戴尔")
+                st.session_state.global_market_snapshot = fetch_global_market_snapshot()
+                st.session_state.global_market_error = ""
+                global_status.write("② 获取韩国KOSPI/KOSDAQ、三星、SK海力士及日经")
+                global_status.write("③ 搜集海外市场、宏观、关税、消费政策新闻")
+                st.session_state.global_news = fetch_global_news()
+                st.session_state.global_news_error = ""
+                global_status.update(label="全球市场数据更新完成", state="complete", expanded=False)
+            except Exception as global_exc:
+                st.session_state.global_market_error = str(global_exc)
+                global_status.update(label="部分全球数据更新失败", state="error", expanded=True)
+
+    tone = st.selectbox(
+        "隔夜新闻综合影响（请核对新闻后确认，避免仅凭标题自动误判）",
+        ["明显利空", "略偏空", "中性", "略偏多", "明显利好"],
+        index=2,
+        key="global_news_tone",
+    )
+    tone_adjustment = {
+        "明显利空": -1.5, "略偏空": -0.75, "中性": 0.0,
+        "略偏多": 0.75, "明显利好": 1.5,
+    }[tone]
+    if st.session_state.global_news_adjustment != tone_adjustment:
+        st.session_state.global_news_adjustment = tone_adjustment
+        if st.session_state.scores_pre_global is not None:
+            st.session_state.scores = _apply_global_market_context(
+                st.session_state.scores_pre_global,
+                st.session_state.global_market_snapshot,
+            )
+
+    global_snapshot = st.session_state.global_market_snapshot
+    if global_snapshot is not None and len(global_snapshot):
+        global_score, global_breakdown = score_global_market(
+            global_snapshot, st.session_state.global_news_adjustment
+        )
+        st.markdown("### 隔夜全球风险评分")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("全球环境分", f"{global_score:.1f}/10", help="全球环境原始分20分，展示时折算为10分；与A股本地10分合并为市场环境20分。")
+        c2.metric("成功接入", f"{len(global_snapshot)}/{len(GLOBAL_ASSETS) if 'GLOBAL_ASSETS' in globals() else 13}")
+        c3.metric("A股市场分占比", "50%")
+        show_global = global_snapshot.rename(columns={
+            "ticker": "代码", "name": "市场/股票", "market": "市场",
+            "price": "最新价", "pct_change": "涨跌幅%", "market_time_cn": "行情时间",
+            "source": "来源", "group": "因子组",
+        })
+        st.dataframe(show_global, use_container_width=True, hide_index=True)
+        st.caption("行情时间按各市场本地交易时间换算为北京时间；美股/日韩休市时，最新一笔数据可能是上一交易日收盘，不等于当前实时价格。")
+        if st.session_state.global_market_breakdown:
+            st.json(st.session_state.global_market_breakdown)
+    else:
+        st.info("尚未取得全球行情。点击上方按钮更新；接口不可用时，不会把缺失数据当作利空。")
+    if st.session_state.global_market_error:
+        st.warning("海外行情提示：" + st.session_state.global_market_error)
+
+    st.markdown("### 隔夜新闻线索")
+    news = st.session_state.global_news
+    if news is not None and len(news):
+        st.dataframe(news, use_container_width=True, hide_index=True)
+        st.caption("新闻来自公开RSS聚合，仅用于发现线索；标题不等于事实结论，重要事件请点开原文核实。")
+    else:
+        st.info("暂无已加载新闻。点击上方刷新按钮获取新闻线索。")
+    if st.session_state.global_news_error:
+        st.warning("新闻抓取提示：" + st.session_state.global_news_error)
+
+    st.divider()
+    st.markdown("### 消费行业主板候选")
+    st.caption("食品饮料、家电家居、零售电商、旅游酒店餐饮、美妆服饰珠宝、汽车、消费电子均纳入；专属财务因子仅在真实字段足够时启用。")
+    if st.session_state.scores is not None and len(st.session_state.scores):
+        consumer = st.session_state.scores.copy()
+        if "sector_category" not in consumer.columns:
+            consumer["sector_category"] = consumer.apply(
+                lambda r: classify_market_sector(r.get("name"), r.get("industry")), axis=1
+            )
+        consumer = consumer[consumer["sector_category"].astype(str).str.startswith("消费/")]
+        if consumer.empty:
+            st.info("本次深度评分结果中暂无消费股。全市场预筛会兼顾行业代表性；可提高深度评分数量后重新扫描。")
+        else:
+            counts = consumer.groupby("sector_category").size().rename("入选数量").reset_index()
+            st.dataframe(counts, use_container_width=True, hide_index=True)
+            columns = [c for c in [
+                "symbol", "name", "sector_category", "industry", "combined_score",
+                "close", "signal", "consumer_quality_score", "roe", "net_profit_yoy",
+                "revenue_yoy", "gross_margin", "inventory_turnover"
+            ] if c in consumer.columns]
+            consumer = consumer.sort_values("combined_score", ascending=False)
+            consumer_show = consumer[columns].rename(columns={
+                "symbol": "代码", "name": "名称", "sector_category": "消费分类",
+                "industry": "行业", "combined_score": "综合评分", "close": "现价",
+                "signal": "信号", "consumer_quality_score": "消费质量分/10",
+                "roe": "ROE", "net_profit_yoy": "净利润同比",
+                "revenue_yoy": "营收同比", "gross_margin": "毛利率",
+                "inventory_turnover": "存货周转率",
+            })
+            st.dataframe(consumer_show.head(30), use_container_width=True, hide_index=True)
+            st.caption("消费质量分至少需要两项可用的真实财务字段；缺失时显示空值，不用推测值填充。")
+            st.download_button(
+                "下载消费股候选CSV",
+                consumer.to_csv(index=False).encode("utf-8-sig"),
+                "consumer_candidates.csv",
+                "text/csv",
+            )
+    else:
+        st.info("先到“数据”页运行实时A股扫描，再回来查看消费行业候选。")
 
 with tab3:
     st.subheader("我的持仓")
@@ -966,7 +1160,7 @@ with tab1:
                 status.write("④ 更新当前持仓现价")
                 h = _refresh_holdings_prices(snapshot)
 
-                status.write("⑤ 运行量化评分与仓位风控")
+                status.write("⑥ 运行量化评分与仓位风控")
                 scores, _ = score_universe(
                     market,
                     cfg,
@@ -974,6 +1168,10 @@ with tab1:
                     str(MODEL_PATH) if MODEL_PATH.exists() else None,
                 )
                 scores = _apply_live_market_context(scores, meta)
+                st.session_state.scores_pre_global = scores.copy()
+                scores = _apply_global_market_context(
+                    scores, st.session_state.global_market_snapshot
+                )
                 st.session_state.scores = scores
                 status.update(
                     label=f"完成：{len(scores)} 只深度评分，用时 {meta.get('elapsed_seconds','—')} 秒",
@@ -984,6 +1182,8 @@ with tab1:
                     f"实时扫描完成：全市场 {meta.get('count', 0)} 只，预筛 {meta.get('preselected', 0)} 只，"
                     f"深度评分 {len(scores)} 只。"
                 )
+                if st.session_state.global_market_error:
+                    st.warning("全球市场因子未接入：" + st.session_state.global_market_error)
             except Exception as e:
                 status.update(label="实时扫描未完成", state="error", expanded=True)
                 st.error(f"实时扫描失败：{e}")
