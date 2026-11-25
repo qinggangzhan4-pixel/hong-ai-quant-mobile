@@ -1161,7 +1161,20 @@ with tab1:
                 st.session_state.live_meta = meta
                 st.session_state.live_selected = selected
 
-                status.write("④ 更新当前持仓现价")
+                status.write("④ 接入美股、韩国、日本隔夜行情和新闻")
+                try:
+                    st.session_state.global_market_snapshot = fetch_global_market_snapshot()
+                    st.session_state.global_market_error = ""
+                except Exception as global_exc:
+                    st.session_state.global_market_snapshot = pd.DataFrame()
+                    st.session_state.global_market_error = str(global_exc)
+                try:
+                    st.session_state.global_news = fetch_global_news()
+                    st.session_state.global_news_error = "；".join(st.session_state.global_news.attrs.get("failures", []))
+                except Exception as news_exc:
+                    st.session_state.global_news_error = str(news_exc)
+
+                status.write("⑤ 更新当前持仓现价")
                 h = _refresh_holdings_prices(snapshot)
 
                 status.write("⑥ 运行量化评分与仓位风控")
