@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import requests
 from urllib.parse import urlsplit, urlunsplit
+from .global_context import classify_market_sector
 
 
 def load_market_csv(path: str) -> pd.DataFrame:
@@ -314,7 +315,27 @@ def preselect_live_candidates(snapshot: pd.DataFrame, limit: int = 20) -> pd.Dat
     )
     vr_score = np.clip((vr - 0.7) / 1.8, 0, 1)
     x["live_pre_score"] = amount_score * 40 + chg_score * 25 + turn_score * 20 + vr_score * 15
-    return x.sort_values(["live_pre_score", "amount"], ascending=False).head(int(limit)).reset_index(drop=True)
+    x["sector_category"] = x.apply(
+        lambda r: classify_market_sector(r.get("name"), r.get("industry")), axis=1
+    )
+
+    # 行业分层预筛：科技、金融、消费、医药、周期等都保留代表样本，
+    # 避免单纯按成交额/涨幅排序时，深度扫描名额被单一热门行业占满。
+    limit = max(1, int(limit))
+    ordered = x.sort_values(["live_pre_score", "amount"], ascending=False)
+    categories = ordered["sector_category"].dropna().astype(str).unique().tolist()
+    per_category = max(1, limit // max(len(categories), 1))
+    first_pass = (
+        ordered.groupby("sector_category", sort=False, group_keys=False)
+        .head(per_category)
+        .drop_duplicates(subset=["symbol"], keep="first")
+    )
+    if len(first_pass) < limit:
+        remaining = ordered.loc[~ordered["symbol"].isin(first_pass["symbol"])]
+        selected = pd.concat([first_pass, remaining.head(limit - len(first_pass))], ignore_index=True)
+    else:
+        selected = first_pass.head(limit)
+    return selected.sort_values(["live_pre_score", "amount"], ascending=False).head(limit).reset_index(drop=True)
 
 
 def _fetch_one_history(symbol: str, name: str, snapshot_row: dict, start: str, end: str) -> pd.DataFrame | None:
