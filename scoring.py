@@ -2,6 +2,7 @@ from __future__ import annotations
 import math
 import numpy as np
 import pandas as pd
+from .global_context import classify_market_sector, consumer_fundamental_score
 
 
 def _num(row, key, default=np.nan):
@@ -66,6 +67,13 @@ def quality_score(row) -> float:
         elif pe > 200 or pe < 0: score -= 2
     if not np.isnan(pb) and pb > 10:
         score -= 1
+    score = float(np.clip(score, 0, 20))
+    # 消费股使用专属财务质量因子；真实字段不足两项时不调整、不补造数据。
+    sector = classify_market_sector(row.get("name"), row.get("industry"))
+    if sector.startswith("消费/"):
+        consumer_score = consumer_fundamental_score(row)
+        if consumer_score is not None:
+            score = 0.75 * score + 0.25 * consumer_score * 2
     return float(np.clip(score, 0, 20))
 
 
@@ -122,4 +130,6 @@ def score_row(row) -> dict:
         "execution_score": execution_score(row),
     }
     parts["rule_score"] = round(sum(parts.values()), 2)
+    parts["sector_category"] = classify_market_sector(row.get("name"), row.get("industry"))
+    parts["consumer_quality_score"] = consumer_fundamental_score(row)
     return parts
