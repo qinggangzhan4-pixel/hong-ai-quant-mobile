@@ -1192,11 +1192,13 @@ with tab6:
                 lambda r: classify_market_sector(r.get("name"), r.get("industry")), axis=1
             )
         consumer = consumer[consumer["sector_category"].astype(str).str.startswith("消费/")]
+        counts = consumer.groupby("sector_category").size().to_dict() if not consumer.empty else {}
+        coverage = pd.DataFrame({"消费分类": list(CONSUMER_CATEGORIES.keys())})
+        coverage["入选数量"] = coverage["消费分类"].map(counts).fillna(0).astype(int)
+        st.dataframe(coverage, use_container_width=True, hide_index=True)
         if consumer.empty:
             st.info("本次深度评分结果中暂无消费股。全市场预筛会兼顾行业代表性；可提高深度评分数量后重新扫描。")
         else:
-            counts = consumer.groupby("sector_category").size().rename("入选数量").reset_index()
-            st.dataframe(counts, use_container_width=True, hide_index=True)
             columns = [c for c in [
                 "symbol", "name", "sector_category", "industry", "combined_score",
                 "close", "signal", "consumer_quality_score", "roe", "net_profit_yoy",
