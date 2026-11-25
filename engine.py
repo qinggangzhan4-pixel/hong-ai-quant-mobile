@@ -80,7 +80,7 @@ def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame
 
     risk = portfolio_risk(holdings, float(config["account"]["equity"])) if holdings is not None else {}
     cols = [
-        "date", "symbol", "name", "industry", "close", "ret_1",
+        "date", "symbol", "name", "industry", "sector_category", "consumer_quality_score", "close", "ret_1",
         "market_score", "industry_score", "quality_score", "trend_score", "execution_score",
         "rule_score", "ml_probability", "combined_score", "relay_score", "relay_status", "signal",
         "entry_price", "stop_price", "stop_pct", "suggested_shares", "suggested_value", "action",
@@ -88,7 +88,8 @@ def score_universe(market_df: pd.DataFrame, config: dict, holdings: pd.DataFrame
         "market_breadth_ma20", "industry_ret_1", "industry_ret_5", "industry_ret_10", "industry_breadth_ma20",
         "vol_ratio5", "turnover_rate", "rsi14", "atr14", "atr14_pct",
         "roe", "net_profit_yoy", "main_net_inflow", "financial_report_date", "flow_date",
-        "pe_ttm", "pb", "market_cap", "amount", "industry_member_count"
+        "pe_ttm", "pb", "market_cap", "amount", "industry_member_count",
+        "revenue_yoy", "gross_margin", "inventory_turnover", "operating_cashflow_to_profit"
     ]
     existing = [c for c in cols if c in latest.columns]
     latest = latest.sort_values(["combined_score", "relay_score"], ascending=False)
