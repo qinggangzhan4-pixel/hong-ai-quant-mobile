@@ -21,7 +21,7 @@ from ai_quant.risk import portfolio_risk
 from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan, fetch_watchlist_fundamentals_and_flow, add_watchlist_industry_context, score_live_industry_context
 from ai_quant.global_context import (
     CONSUMER_CATEGORIES, classify_market_sector, fetch_global_market_snapshot,
-    fetch_global_news, score_global_market,
+    fetch_global_news, score_global_market, consumer_fundamental_score,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -407,6 +407,90 @@ def _apply_global_market_context(scores, snapshot=None):
     ).reset_index(drop=True)
 
 
+def _apply_consumer_financials(base_scores, financials):
+    """把真实财报字段补回基础评分；只对此前没有消费专属分的股票调整一次。"""
+    if base_scores is None or len(base_scores) == 0 or financials is None or financials.empty:
+        return base_scores
+    x = base_scores.copy()
+    x["symbol"] = x["symbol"].astype(str).str.zfill(6)
+    fin = financials.copy()
+    fin["symbol"] = fin["symbol"].astype(str).str.zfill(6)
+    fin = fin.drop_duplicates("symbol").set_index("symbol")
+
+    previous_flow = (
+        pd.to_numeric(x["main_net_inflow"], errors="coerce")
+        if "main_net_inflow" in x.columns else pd.Series(np.nan, index=x.index)
+    )
+    previous_consumer_score = (
+        pd.to_numeric(x["consumer_quality_score"], errors="coerce")
+        if "consumer_quality_score" in x.columns else pd.Series(np.nan, index=x.index)
+    )
+
+    for col in [
+        "roe", "net_profit_yoy", "revenue_yoy", "gross_margin",
+        "inventory_turnover", "operating_cashflow_to_profit",
+        "main_net_inflow", "financial_report_date", "flow_date",
+    ]:
+        if col not in fin.columns:
+            continue
+        mapped = x["symbol"].map(fin[col])
+        if col in x.columns:
+            x[col] = x[col].combine_first(mapped)
+        else:
+            x[col] = mapped
+
+    new_consumer_score = x.apply(consumer_fundamental_score, axis=1)
+    new_consumer_score = pd.to_numeric(new_consumer_score, errors="coerce")
+    first_time = new_consumer_score.notna() & previous_consumer_score.isna()
+    old_quality = pd.to_numeric(x["quality_score"], errors="coerce").fillna(10.0)
+    new_quality = old_quality.copy()
+    new_quality.loc[first_time] = (
+        0.75 * old_quality.loc[first_time]
+        + 0.25 * new_consumer_score.loc[first_time] * 2
+    )
+    x["quality_score"] = new_quality.clip(0, 20)
+    x["consumer_quality_score"] = new_consumer_score.combine_first(previous_consumer_score)
+    x["rule_score"] = (
+        pd.to_numeric(x["rule_score"], errors="coerce").fillna(0)
+        + (x["quality_score"] - old_quality)
+    ).round(2)
+
+    # 若本次首次补到真实主力资金流，则把已有执行分按正负流向微调1分。
+    current_flow = pd.to_numeric(x.get("main_net_inflow", np.nan), errors="coerce")
+    if isinstance(current_flow, pd.Series):
+        new_flow = previous_flow.isna() & current_flow.notna()
+        old_execution = pd.to_numeric(x["execution_score"], errors="coerce").fillna(8.0)
+        flow_delta = pd.Series(0.0, index=x.index)
+        flow_delta.loc[new_flow & (current_flow > 0)] = 1.0
+        flow_delta.loc[new_flow & (current_flow <= 0)] = -1.0
+        x["execution_score"] = (old_execution + flow_delta).clip(0, 15)
+        x["rule_score"] = (x["rule_score"] + (x["execution_score"] - old_execution)).round(2)
+
+    ml = pd.to_numeric(x.get("ml_probability", np.nan), errors="coerce")
+    rw = float(cfg["strategy"]["rule_weight"])
+    mw = float(cfg["strategy"]["model_weight"])
+    x["combined_score"] = pd.to_numeric(x["rule_score"], errors="coerce").fillna(0)
+    if isinstance(ml, pd.Series):
+        use_ml = ml.notna()
+        x.loc[use_ml, "combined_score"] = (
+            rw * x.loc[use_ml, "rule_score"] + mw * (ml[use_ml] * 100)
+        )
+    buy_th = float(cfg["strategy"]["score_buy_threshold"])
+    watch_th = float(cfg["strategy"]["score_watch_threshold"])
+    x["signal"] = np.where(
+        x["combined_score"] >= buy_th,
+        "BUY_CANDIDATE",
+        np.where(x["combined_score"] >= watch_th, "WATCH", "AVOID"),
+    )
+    if "relay_status" in x.columns and "relay_score" in x.columns:
+        applicable = x["relay_status"].astype(str) != "not_applicable"
+        x.loc[applicable & (x["relay_score"] < 50), "signal"] = "AVOID_RELAY"
+        x.loc[applicable & (x["relay_score"] >= 70), "signal"] = "RELAY_CANDIDATE"
+    return x.sort_values(
+        ["combined_score", "relay_score"], ascending=False
+    ).reset_index(drop=True)
+
+
 def _refresh_holdings_prices(snapshot):
     h = clean_holdings(st.session_state.holdings)
     if h.empty or snapshot is None or len(snapshot) == 0:
@@ -651,6 +735,8 @@ if "global_news_error" not in st.session_state:
     st.session_state.global_news_error = ""
 if "scores_pre_global" not in st.session_state:
     st.session_state.scores_pre_global = None
+if "consumer_financials_meta" not in st.session_state:
+    st.session_state.consumer_financials_meta = {}
 if st.session_state.get("holdings_revision") != CURRENT_HOLDINGS_REV:
     st.session_state.holdings = _holdings_from_url()
     st.session_state.holdings_revision = CURRENT_HOLDINGS_REV
@@ -1055,6 +1141,45 @@ with tab6:
     st.divider()
     st.markdown("### 消费行业主板候选")
     st.caption("食品饮料、家电家居、零售电商、旅游酒店餐饮、美妆服饰珠宝、汽车、消费电子均纳入；专属财务因子仅在真实字段足够时启用。")
+    if st.button("🧾 补齐消费候选财务与资金流", use_container_width=True):
+        base_scores = st.session_state.scores_pre_global
+        if base_scores is None or len(base_scores) == 0:
+            st.warning("请先运行一次实时A股深度扫描。")
+        else:
+            consumer_base = base_scores.copy()
+            if "sector_category" not in consumer_base.columns:
+                consumer_base["sector_category"] = consumer_base.apply(
+                    lambda r: classify_market_sector(r.get("name"), r.get("industry")), axis=1
+                )
+            consumer_symbols = (
+                consumer_base.loc[
+                    consumer_base["sector_category"].astype(str).str.startswith("消费/"),
+                    "symbol",
+                ].astype(str).str.zfill(6).drop_duplicates().head(20).tolist()
+            )
+            if not consumer_symbols:
+                st.info("本次深度扫描没有消费股候选，请提高深度扫描数量后重试。")
+            else:
+                with st.spinner(f"正在补齐{len(consumer_symbols)}只消费股的公开财报和资金流……"):
+                    consumer_financials = fetch_watchlist_fundamentals_and_flow(
+                        consumer_symbols, max_workers=4
+                    )
+                    consumer_base = _apply_consumer_financials(
+                        consumer_base, consumer_financials
+                    )
+                    st.session_state.scores_pre_global = consumer_base
+                    st.session_state.scores = _apply_global_market_context(
+                        consumer_base, st.session_state.global_market_snapshot
+                    )
+                    st.session_state.consumer_financials_meta = {
+                        "requested": len(consumer_symbols),
+                        "returned": int(consumer_financials["symbol"].nunique()) if "symbol" in consumer_financials else 0,
+                        "failures": consumer_financials.attrs.get("failures", []),
+                    }
+                st.success("消费股财务与资金流补齐完成，评分已重新计算。")
+                if st.session_state.consumer_financials_meta.get("failures"):
+                    st.warning("部分字段未返回：" + "；".join(st.session_state.consumer_financials_meta["failures"][:8]))
+
     if st.session_state.scores is not None and len(st.session_state.scores):
         consumer = st.session_state.scores.copy()
         if "sector_category" not in consumer.columns:
@@ -1070,7 +1195,8 @@ with tab6:
             columns = [c for c in [
                 "symbol", "name", "sector_category", "industry", "combined_score",
                 "close", "signal", "consumer_quality_score", "roe", "net_profit_yoy",
-                "revenue_yoy", "gross_margin", "inventory_turnover"
+                "revenue_yoy", "gross_margin", "inventory_turnover",
+                "main_net_inflow", "financial_report_date", "flow_date"
             ] if c in consumer.columns]
             consumer = consumer.sort_values("combined_score", ascending=False)
             consumer_show = consumer[columns].rename(columns={
@@ -1079,7 +1205,8 @@ with tab6:
                 "signal": "信号", "consumer_quality_score": "消费质量分/10",
                 "roe": "ROE", "net_profit_yoy": "净利润同比",
                 "revenue_yoy": "营收同比", "gross_margin": "毛利率",
-                "inventory_turnover": "存货周转率",
+                "inventory_turnover": "存货周转率", "main_net_inflow": "主力净流入",
+                "financial_report_date": "财报日期", "flow_date": "资金日期",
             })
             st.dataframe(consumer_show.head(30), use_container_width=True, hide_index=True)
             st.caption("消费质量分至少需要两项可用的真实财务字段；缺失时显示空值，不用推测值填充。")
