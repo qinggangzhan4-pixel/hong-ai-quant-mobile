@@ -464,7 +464,7 @@ def _eastmoney_secucode(symbol: str) -> str:
 
 
 def fetch_financial_quality(symbol: str) -> dict:
-    """最新公开财报：加权ROE、归母净利润同比；缺失时保留NaN。"""
+    """最新公开财报：ROE、净利润/营收同比、毛利率、存货周转；字段缺失时保留NaN。"""
     params = {
         "reportName": "RPT_F10_FINANCE_MAINFINADATA",
         "columns": "ALL",
@@ -477,11 +477,25 @@ def fetch_financial_quality(symbol: str) -> dict:
     j = _get_json("https://datacenter.eastmoney.com/securities/api/data/v1/get", params, timeout=12)
     rows = ((j.get("result") or {}).get("data") or [])
     if not rows:
-        return {"roe": np.nan, "net_profit_yoy": np.nan, "financial_report_date": None}
+        return {
+            "roe": np.nan, "net_profit_yoy": np.nan, "revenue_yoy": np.nan,
+            "gross_margin": np.nan, "inventory_turnover": np.nan,
+            "operating_cashflow_to_profit": np.nan, "financial_report_date": None,
+        }
     row = rows[0]
+    def field_num(*keys):
+        for key in keys:
+            value = pd.to_numeric(pd.Series([row.get(key)]), errors="coerce").iloc[0]
+            if pd.notna(value):
+                return float(value)
+        return np.nan
     return {
-        "roe": pd.to_numeric(pd.Series([row.get("ROEJQ")]), errors="coerce").iloc[0],
-        "net_profit_yoy": pd.to_numeric(pd.Series([row.get("PARENTNETPROFITTZ")]), errors="coerce").iloc[0],
+        "roe": field_num("ROEJQ"),
+        "net_profit_yoy": field_num("PARENTNETPROFITTZ"),
+        "revenue_yoy": field_num("TOTALOPERATEREVETZ"),
+        "gross_margin": field_num("XSMLL", "SALESGPMARGIN"),
+        "inventory_turnover": field_num("CHZZL", "INVENTORYTURNOVER"),
+        "operating_cashflow_to_profit": field_num("OPERATECASHFLOWTOPROFIT"),
         "financial_report_date": row.get("REPORT_DATE") or row.get("REPORT_DATE_NAME"),
     }
 
@@ -528,7 +542,9 @@ def fetch_watchlist_fundamentals_and_flow(symbols: list[str], max_workers: int =
                 failures.append(f"{symbol}-{kind}:{str(exc)[:100]}")
                 if kind == "fundamental":
                     results.setdefault(symbol, {}).update({
-                        "roe": np.nan, "net_profit_yoy": np.nan, "financial_report_date": None
+                        "roe": np.nan, "net_profit_yoy": np.nan, "revenue_yoy": np.nan,
+                        "gross_margin": np.nan, "inventory_turnover": np.nan,
+                        "operating_cashflow_to_profit": np.nan, "financial_report_date": None
                     })
                 else:
                     results.setdefault(symbol, {}).update({
