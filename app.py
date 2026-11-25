@@ -1081,6 +1081,11 @@ with tab6:
                     st.session_state.global_market_snapshot,
                     st.session_state.global_news_adjustment,
                 )[1]
+                if st.session_state.scores_pre_global is not None:
+                    st.session_state.scores = _apply_global_market_context(
+                        st.session_state.scores_pre_global,
+                        st.session_state.global_market_snapshot,
+                    )
                 global_status.update(label="全球市场数据更新完成", state="complete", expanded=False)
             except Exception as global_exc:
                 st.session_state.global_market_error = str(global_exc)
@@ -1111,7 +1116,7 @@ with tab6:
         )
         st.markdown("### 隔夜全球风险评分")
         c1, c2, c3 = st.columns(3)
-        c1.metric("全球环境分", f"{global_score:.1f}/10", help="全球环境原始分20分，展示时折算为10分；与A股本地10分合并为市场环境20分。")
+        c1.metric("全球环境分", f"{global_score:.1f}/10", help="全球隔夜环境10分；与A股本地环境10分合并为市场环境20分。")
         c2.metric("成功接入", f"{len(global_snapshot)}/{len(GLOBAL_ASSETS) if 'GLOBAL_ASSETS' in globals() else 13}")
         c3.metric("A股市场分占比", "50%")
         show_global = global_snapshot.rename(columns={
@@ -1310,7 +1315,10 @@ with tab1:
                 status.write("④ 接入美股、韩国、日本隔夜行情和新闻")
                 try:
                     st.session_state.global_market_snapshot = fetch_global_market_snapshot()
-                    st.session_state.global_market_error = ""
+                    st.session_state.global_market_error = (
+                        "" if len(st.session_state.global_market_snapshot)
+                        else "海外行情接口未返回数据，市场评分暂时只使用A股本地数据。"
+                    )
                 except Exception as global_exc:
                     st.session_state.global_market_snapshot = pd.DataFrame()
                     st.session_state.global_market_error = str(global_exc)
