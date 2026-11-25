@@ -20,7 +20,7 @@ from ai_quant.engine import score_universe
 from ai_quant.risk import portfolio_risk
 from ai_quant.data import fetch_live_a_scan, fetch_realtime_etf_snapshot, fetch_realtime_a_snapshot, fetch_watchlist_scan, fetch_watchlist_fundamentals_and_flow, add_watchlist_industry_context, score_live_industry_context
 from ai_quant.global_context import (
-    CONSUMER_CATEGORIES, classify_market_sector, fetch_global_market_snapshot,
+    CONSUMER_CATEGORIES, GLOBAL_ASSETS, classify_market_sector, fetch_global_market_snapshot,
     fetch_global_news, score_global_market, consumer_fundamental_score,
 )
 
@@ -1117,7 +1117,7 @@ with tab6:
         st.markdown("### 隔夜全球风险评分")
         c1, c2, c3 = st.columns(3)
         c1.metric("全球环境分", f"{global_score:.1f}/10", help="全球隔夜环境10分；与A股本地环境10分合并为市场环境20分。")
-        c2.metric("成功接入", f"{len(global_snapshot)}/{len(GLOBAL_ASSETS) if 'GLOBAL_ASSETS' in globals() else 13}")
+        c2.metric("成功接入", f"{len(global_snapshot)}/{len(GLOBAL_ASSETS)}")
         c3.metric("A股市场分占比", "50%")
         show_global = global_snapshot.rename(columns={
             "ticker": "代码", "name": "市场/股票", "market": "市场",
