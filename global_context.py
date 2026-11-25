@@ -177,53 +177,64 @@ def fetch_global_market_snapshot(max_workers: int = 6) -> pd.DataFrame:
 
 
 def fetch_global_news(max_per_query: int = 6) -> pd.DataFrame:
-    """从Google News RSS收集隔夜宏观、海外科技、韩国半导体及中国消费政策新闻线索。"""
+    """并发收集海外市场、韩国半导体、中国消费政策及大宗商品新闻线索。"""
     queries = [
         ("海外市场与美联储", "US stock market Federal Reserve inflation tariffs AI semiconductor"),
         ("韩国与半导体", "韩国股市 三星电子 SK海力士 半导体"),
         ("中国政策与消费", "中国 A股 消费政策 零售 家电 汽车 经济"),
         ("大宗商品与汇率", "oil gold copper US dollar yuan market"),
     ]
+
+    def fetch_one(label, query):
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(
+            "https://news.google.com/rss/search",
+            params={"q": query, "hl": "zh-CN", "gl": "CN", "ceid": "CN:zh-Hans"},
+            headers=headers,
+            timeout=8,
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        rows = []
+        for item in root.findall(".//item")[:max_per_query]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub = (item.findtext("pubDate") or "").strip()
+            source = (item.findtext("source") or "").strip()
+            published = pub
+            try:
+                published = parsedate_to_datetime(pub).astimezone(
+                    ZoneInfo("Asia/Shanghai")
+                ).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+            if title and link:
+                rows.append({
+                    "主题": label, "时间": published, "标题": title,
+                    "来源": source, "链接": link,
+                })
+        return rows
+
     rows, failures = [], []
-    headers = {"User-Agent": "Mozilla/5.0"}
-    for label, query in queries:
-        try:
-            response = requests.get(
-                "https://news.google.com/rss/search",
-                params={"q": query, "hl": "zh-CN", "gl": "CN", "ceid": "CN:zh-Hans"},
-                headers=headers,
-                timeout=8,
-            )
-            response.raise_for_status()
-            root = ET.fromstring(response.content)
-            items = root.findall(".//item")
-            for item in items[:max_per_query]:
-                title = (item.findtext("title") or "").strip()
-                link = (item.findtext("link") or "").strip()
-                pub = (item.findtext("pubDate") or "").strip()
-                source = (item.findtext("source") or "").strip()
-                published = pub
-                try:
-                    published = parsedate_to_datetime(pub).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    pass
-                if title and link:
-                    rows.append({
-                        "主题": label,
-                        "时间": published,
-                        "标题": title,
-                        "来源": source,
-                        "链接": link,
-                    })
-        except Exception as exc:
-            failures.append(f"{label}: {exc}")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(fetch_one, label, query): label for label, query in queries}
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                rows.extend(future.result())
+            except Exception as exc:
+                failures.append(f"{label}: {exc}")
+
     out = pd.DataFrame(rows, columns=["主题", "时间", "标题", "来源", "链接"])
     if not out.empty:
-        out = out.drop_duplicates(subset=["标题"]).sort_values("时间", ascending=False).reset_index(drop=True)
+        out = out.drop_duplicates(subset=["标题"]).sort_values(
+            "时间", ascending=False
+        ).reset_index(drop=True)
     out.attrs["failures"] = failures
-    out.attrs["fetched_at_cn"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    out.attrs["fetched_at_cn"] = datetime.now(
+        ZoneInfo("Asia/Shanghai")
+    ).strftime("%Y-%m-%d %H:%M:%S")
     return out
-
 
 def _group_score(values, max_points: float) -> float:
     valid = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
@@ -246,7 +257,7 @@ def _group_score(values, max_points: float) -> float:
 
 
 def score_global_market(snapshot: pd.DataFrame | None, news_adjustment: float = 0.0) -> tuple[float, dict]:
-    """全球环境20分：美股大盘2、美股科技/半导体3、日韩2、隔夜新闻/宏观3；缺失组按中性处理。"""
+    """全球环境10分：美股大盘2、美股科技/半导体3、日韩2、隔夜新闻/宏观3；缺失组按中性处理。"""
     weights = {"us_broad": 2.0, "us_tech": 3.0, "asia": 2.0}
     breakdown = {}
     if snapshot is None or snapshot.empty:
