@@ -372,7 +372,7 @@ def _apply_global_market_context(scores, snapshot=None):
             snapshot, st.session_state.get("global_news_adjustment", 0.0)
         )
         old_market = pd.to_numeric(x["market_score"], errors="coerce").fillna(10.0)
-        blended_market = old_market * 0.5 + float(global_score) * 0.5
+        blended_market = old_market * 0.5 + float(global_score)
         x["market_score"] = blended_market.round(2)
         x["rule_score"] = (
             pd.to_numeric(x["rule_score"], errors="coerce").fillna(0)
@@ -971,7 +971,11 @@ with tab6:
                 global_status.write("② 获取韩国KOSPI/KOSDAQ、三星、SK海力士及日经")
                 global_status.write("③ 搜集海外市场、宏观、关税、消费政策新闻")
                 st.session_state.global_news = fetch_global_news()
-                st.session_state.global_news_error = ""
+                st.session_state.global_news_error = "；".join(st.session_state.global_news.attrs.get("failures", []))
+                st.session_state.global_market_breakdown = score_global_market(
+                    st.session_state.global_market_snapshot,
+                    st.session_state.global_news_adjustment,
+                )[1]
                 global_status.update(label="全球市场数据更新完成", state="complete", expanded=False)
             except Exception as global_exc:
                 st.session_state.global_market_error = str(global_exc)
